@@ -1,0 +1,28 @@
+[Unit]
+Description=AI bootstrap mihomo egress
+Requires=ai-bootstrap-firewall.service
+Wants=network-online.target
+After=ai-bootstrap-firewall.service network-online.target
+
+[Service]
+Type=exec
+User=ai-mihomo
+Group=ai-mihomo
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+StateDirectory=ai-mihomo
+StateDirectoryMode=0700
+UMask=0077
+ExecStart=/usr/local/libexec/ai-bootstrap/mihomo -d /var/lib/ai-mihomo -f /etc/ai-bootstrap/mihomo.yaml
+ExecStartPost=+/usr/local/libexec/ai-bootstrap/mihomo-route.sh
+Restart=on-failure
+RestartSec=2s
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
