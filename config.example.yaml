@@ -1,0 +1,34 @@
+ssh:
+  admin_ipv4:
+    - 192.0.2.24/32
+
+portal:
+  transport: local-http
+  # Для https задайте domain и expected_ipv4.
+
+mihomo:
+  profile: |
+    mode: rule
+    allow-lan: false
+    ipv6: false
+    tun:
+      enable: true
+      device: ai-mihomo
+      auto-route: false
+      auto-redirect: false
+      dns-hijack: ["any:53", "tcp://any:53"]
+    dns:
+      enable: true
+      listen: "127.0.0.1:1053"
+      ipv6: false
+      nameserver: ["https://1.1.1.1/dns-query#egress"]
+    proxies:
+      - name: egress
+        type: socks5
+        server: 203.0.113.10
+        port: 1080
+        udp: true
+    rules:
+      - DOMAIN,example.org,DIRECT
+      - MATCH,egress
+      - MATCH,REJECT

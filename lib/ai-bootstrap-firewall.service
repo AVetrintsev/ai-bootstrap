@@ -1,0 +1,15 @@
+[Unit]
+Description=AI bootstrap firewall
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target ssh.service ssh.socket shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/ai-bootstrap/firewall.nft
+ExecReload=/usr/sbin/nft -f /etc/ai-bootstrap/firewall.nft
+
+[Install]
+WantedBy=multi-user.target
