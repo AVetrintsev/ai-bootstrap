@@ -9,7 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class ConfigTests(unittest.TestCase):
-    def stage(self, content, mode=0o600):
+    def stage(self, content, mode=0o600, artifact="profile.yaml"):
         with tempfile.TemporaryDirectory() as directory:
             work = pathlib.Path(directory)
             config = work / "config.yaml"
@@ -20,8 +20,14 @@ class ConfigTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            profile = work / "profile.yaml"
-            return result, profile.read_text(encoding="utf-8") if profile.exists() else None
+            output = work / artifact
+            return result, output.read_text(encoding="utf-8") if output.exists() else None
+
+    def test_stages_local_transport_without_public_address(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        result, transport = self.stage(example, artifact="portal-transport")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(transport, "local-http\n")
 
     def test_stages_the_complete_profile_from_the_example(self):
         example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")

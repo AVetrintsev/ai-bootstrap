@@ -95,6 +95,7 @@ def validate_portal(portal):
             ipaddress.IPv4Address(address)
         except ValueError:
             raise ValueError("portal.expected_ipv4 must be an IPv4 address for https") from None
+    return transport
 
 
 def stage(config_path, work):
@@ -119,7 +120,7 @@ def stage(config_path, work):
     if networks[0].prefixlen == 0:
         raise ValueError("ssh.admin_ipv4 must restrict access to administrator networks")
 
-    validate_portal(mapping(config.get("portal", {}), "portal"))
+    transport = validate_portal(mapping(config.get("portal", {}), "portal"))
     profile = mapping(config.get("mihomo"), "mihomo").get("profile")
     validate_profile(profile)
 
@@ -128,6 +129,7 @@ def stage(config_path, work):
     (work / "firewall.nft").write_text(rules, encoding="utf-8")
     (work / "admin-ipv4").write_text("\n".join(map(str, networks)), encoding="utf-8")
     (work / "profile.yaml").write_text(profile, encoding="utf-8")
+    (work / "portal-transport").write_text(transport + "\n", encoding="utf-8")
 
 
 def check_ssh(work):

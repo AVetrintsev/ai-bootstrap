@@ -15,12 +15,16 @@ quiet() {
     "$@" >/dev/null 2>&1 || fail "$reason"
 }
 
+skip_step() {
+    printf 'SKIP install/%s: %s\n' "$1" "$2"
+}
+
 run_step() {
     step=$1
     skip_reason=
     "$1"
     if [[ -n $skip_reason ]]; then
-        printf 'SKIP install/%s: %s\n' "$step" "$skip_reason"
+        skip_step "$step" "$skip_reason"
     else
         printf 'OK install/%s\n' "$step"
     fi
@@ -68,6 +72,7 @@ preflight() {
     local reason
     reason=$(python3 -I "$release/lib/config.py" "$config" "$work" 2>&1) ||
         fail "${reason%%$'\n'*}"
+    read -r portal_transport < "$work/portal-transport"
     [[ $(readlink -f /etc/resolv.conf) == /run/systemd/resolve/stub-resolv.conf ]] ||
         fail 'expected /etc/resolv.conf to use the systemd-resolved stub'
     quiet 'systemd-resolved must be running' systemctl is-active --quiet systemd-resolved.service
@@ -172,6 +177,12 @@ EOF
     fi
     [[ $(grep '^port ' "$work/ssh-effective") == 'port 22' ]] ||
         fail 'expected the SSH configuration to use only TCP port 22'
+    if [[ $portal_transport == local-http ]]; then
+        grep -Eq '^allowtcpforwarding (yes|all|local)$' "$work/ssh-effective" &&
+            grep -qx 'disableforwarding no' "$work/ssh-effective" &&
+            grep -Eq '^permitopen (.* )?(any|127\.0\.0\.1:8080|127\.0\.0\.1:\*|\*:8080|\*:\*)( |$)' "$work/ssh-effective" ||
+            fail 'sshd must allow local TCP forwarding to 127.0.0.1:8080'
+    fi
     quiet 'nftables rejected the candidate firewall' nft --check --file "$work/firewall.nft"
 }
 
@@ -220,6 +231,38 @@ verify_egress() {
         --connect-timeout 10 --max-time 20 https://example.com/
 }
 
+configure_local_http() {
+    local unit=nginx.service dropin=/etc/systemd/system/nginx.service.d
+    local nginx_config=$release/lib/nginx-local-http.conf
+    local unit_config=$release/lib/nginx-local-http.service.conf
+    if [[ -x /usr/sbin/nginx ]]; then
+        quiet 'nginx rejected the candidate configuration' /usr/sbin/nginx -t -q -c "$nginx_config"
+    fi
+    # Install the override before apt can start the vendor service with the default site.
+    install -d -m 0755 "$dropin"
+    publish "$nginx_config" "$etc/nginx.conf" 644
+    publish "$unit_config" "$dropin/90-ai-bootstrap.conf" 644
+    quiet 'could not load the nginx override' systemctl daemon-reload
+    if [[ $(dpkg-query -W -f='${db:Status-Status}' nginx 2>/dev/null) != installed ]]; then
+        quiet 'could not refresh package indexes for nginx' apt-get -q update
+        quiet 'could not install nginx' apt-get -qy --no-install-recommends install nginx
+    fi
+    quiet 'nginx rejected the installed configuration' /usr/sbin/nginx -t -q -c "$etc/nginx.conf"
+    quiet 'could not apply the local nginx configuration' systemctl restart "$unit"
+    quiet 'could not enable nginx at boot' systemctl enable "$unit"
+}
+
+verify_local_http() {
+    local listeners response
+    listeners=$(ss -Hltnp | awk '/"nginx"/ {print $4}')
+    [[ $listeners == '127.0.0.1:8080' ]] ||
+        fail 'expected nginx to listen only on 127.0.0.1:8080'
+    response=$(curl -q --noproxy '*' --fail --silent --max-time 10 --write-out '%{http_code}' \
+        http://127.0.0.1:8080/) || fail 'could not reach nginx on 127.0.0.1:8080'
+    [[ $response == $'ai-bootstrap local HTTP\n200' ]] ||
+        fail 'unexpected HTTP response from 127.0.0.1:8080'
+}
+
 run_step preflight
 run_step packages
 run_step directories
@@ -229,3 +272,13 @@ run_step configure_ssh
 run_step configure_firewall
 run_step configure_mihomo
 run_step verify_egress
+if [[ $portal_transport == local-http ]]; then
+    run_step configure_local_http
+    run_step verify_local_http
+    skip_step public_dns 'local-http needs no public DNS'
+    skip_step acme 'local-http needs no TLS certificate'
+    skip_step globalping 'local-http has no public web endpoint'
+    printf '%s\n' 'From an allowed administrator address, run:' \
+        '  ssh -4 -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8080:127.0.0.1:8080 USER@AI_HOST' \
+        'Open http://localhost:8080 in your browser.'
+fi
