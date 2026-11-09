@@ -1,9 +1,11 @@
 import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from io import BytesIO, StringIO
 from pathlib import Path
 import re
+import sqlite3
 import sys
 import tempfile
 from threading import Barrier
@@ -35,10 +37,11 @@ class PortalTest(unittest.TestCase):
             print_activation_url(self.portal.owner, base)
         return output.getvalue().strip()
 
-    def request(self, path, *, form=None, cookie="", ip="192.0.2.1"):
+    def request(self, path, *, streaming=False, headers=None, form=None, cookie="", ip="192.0.2.1"):
         environ = {}
         setup_testing_defaults(environ)
         environ.update(PATH_INFO=path, HTTP_COOKIE=cookie, HTTP_X_PORTAL_CLIENT_IP=ip)
+        environ.update(headers or {})
         if form is not None:
             data = urlencode(form).encode()
             environ.update(
@@ -52,12 +55,11 @@ class PortalTest(unittest.TestCase):
         def start_response(status, headers):
             result.extend((int(status.split()[0]), dict(headers)))
 
-        body = b"".join(self.portal(environ, start_response))
-        return *result, body
+        body = self.portal(environ, start_response)
+        return *result, body if streaming else b"".join(body)
 
     def code(self, secret):
         # Independent RFC 4226 calculation as an authenticator would perform it.
-        import hashlib
         import hmac
 
         message = (self.time // 30).to_bytes(8, "big")
@@ -184,3 +186,74 @@ class PortalTest(unittest.TestCase):
         self.assertIn(replacement.encode(), self.request("/", cookie=cookie)[2])
         self.time += 30
         self.assertEqual(self.request(replacement, form={"code": self.code(secret)})[0], 303)
+
+    def browser_forms(self, body):
+        csrf = re.search(rb'name="csrf" value="([0-9a-f]+)"', body).group(1).decode()
+        paths = re.findall(rb'action="(/browsers/[0-9a-f]+/rename)"', body)
+        return csrf, [path.decode() for path in paths]
+
+    def test_browser_rename_and_revoke_are_protected_and_persist(self):
+        owner, registration, secret = self.enroll()
+        self.time += 30
+        status, headers, _ = self.request(registration, form={"code": self.code(secret)})
+        self.assertEqual(status, 303)
+        other = headers["Set-Cookie"].split(";", 1)[0]
+        csrf, (_, rename) = self.browser_forms(self.request("/", cookie=owner)[2])
+        self.assertEqual(self.request(rename, cookie=owner, form={"name": "Rejected"})[0], 403)
+
+        name = 'Firefox <desktop>'
+        status, headers, _ = self.request(rename, cookie=owner, form={"csrf": csrf, "name": name})
+        self.assertEqual(status, 303)
+        self.assertIn("Max-Age=2592000", headers["Set-Cookie"])
+        self.portal = self.new_portal()
+        page = self.request("/", cookie=owner)[2]
+        self.assertIn(b"Firefox &lt;desktop&gt;", page)
+        self.assertIn(b"2023-11-14", page)
+        self.assertIn(b"2023-12-14", page)
+
+        revoke = rename.removesuffix("rename") + "revoke"
+        self.assertEqual(self.request(revoke, cookie=owner, form={"csrf": csrf})[0], 303)
+        self.portal = self.new_portal()
+        self.assertEqual(self.request("/", cookie=other)[0], 404)
+        self.assertEqual(self.request("/", cookie=owner)[0], 200)
+        self.assertNotIn(b"Firefox", self.request("/", cookie=owner)[2])
+
+    def test_only_foreground_navigation_renews_session_and_cookie(self):
+        cookie, _, _ = self.enroll()
+        self.time += 29 * 86400
+        navigation = {"HTTP_SEC_FETCH_MODE": "navigate", "HTTP_SEC_FETCH_DEST": "document"}
+        status, headers, _ = self.request("/", cookie=cookie, headers=navigation)
+        self.assertEqual(status, 200)
+        self.assertIn("Max-Age=2592000", headers["Set-Cookie"])
+
+        self.time += 29 * 86400
+        for path, fetch_headers in (
+            ("/", {}),
+            ("/", {**navigation, "HTTP_SEC_PURPOSE": "prefetch"}),
+            ("/api/status", {}),
+            ("/_session", {}),
+        ):
+            self.assertNotIn("Set-Cookie", self.request(path, cookie=cookie, headers=fetch_headers)[1])
+        self.time += 86400
+        self.portal = self.new_portal()
+        self.assertEqual(self.request("/", cookie=cookie, headers=navigation)[0], 404)
+
+    def test_upgrade_keeps_existing_browser_and_recovers_registration_date(self):
+        cookie, _, _ = self.enroll()
+        # Recreate the previous release's sessions table and its fixed expiry.
+        with sqlite3.connect(self.state / "portal.sqlite3") as db:
+            db.executescript("""
+                DROP TABLE sessions;
+                CREATE TABLE sessions (token_hash BLOB PRIMARY KEY, expires_at INTEGER NOT NULL);
+            """)
+            token_hash = hashlib.sha256(cookie.split("=", 1)[1].encode()).digest()
+            db.execute("INSERT INTO sessions VALUES (?, ?)", (token_hash, self.time + 30 * 86400))
+        db.close()
+
+        self.activation()  # The installer initializes the schema before starting the new service.
+        self.activation()
+        self.portal = self.new_portal()
+        status, _, page = self.request("/", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(page.count(b"2023-11-14 22:13:30 UTC"), 2)
+        self.assertIn(b"2023-12-14 22:13:30 UTC", page)
