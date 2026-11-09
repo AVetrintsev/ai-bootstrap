@@ -126,7 +126,8 @@ create_project() {
         if ! as_project podman image exists "$image"; then
             as_project podman import - "$image" < "$archive" >/dev/null
         fi
-        as_project podman create --name project --hostname "$project" --user 0 --userns=private \
+        as_project podman --cgroup-manager=systemd create --name project --hostname "$project" \
+            --user 0 --userns=keep-id:uid=0,gid=0 \
             --network slirp4netns:allow_host_loopback=false,enable_ipv6=false --dns 1.1.1.1 \
             --no-hosts --http-proxy=false --image-volume=ignore --log-driver=none \
             --security-opt=no-new-privileges --cap-drop=NET_RAW --cap-drop=MKNOD \
