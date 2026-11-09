@@ -12,7 +12,6 @@ import re
 import socket
 import sqlite3
 import struct
-import subprocess
 import sys
 from threading import BoundedSemaphore, Lock, Thread
 import time
@@ -38,7 +37,7 @@ def numeric_id(value):
     return type(value) is int and 0 < value < 2**63
 
 
-def repository_name(value):
+def is_repository_name(value):
     return (isinstance(value, str) and REPOSITORY.fullmatch(value)
             and value.split("/")[1] not in (".", ".."))
 
@@ -82,23 +81,43 @@ class GitHubApp:
         signature = self.key.sign(payload, padding.PKCS1v15(), hashes.SHA256())
         return (payload + b"." + encoded(signature)).decode("ascii")
 
-    def install_url(self):
+    def details(self):
         app = request("GET", "/app", self.jwt())
+        if app["id"] != self.id or app.get("public") is True:
+            raise ProjectError("Настройте выделенное приватное GitHub App.")
+        return app
+
+    def setup_page(self):
+        app = self.details()
         slug = app["slug"]
-        if app["id"] != self.id or not re.fullmatch(r"[a-z0-9-]{1,100}", slug):
+        if not re.fullmatch(r"[a-z0-9-]{1,100}", slug):
             raise ProjectError(UNAVAILABLE)
-        return f"https://github.com/apps/{slug}/installations/new"
+        return {"install_url": f"https://github.com/apps/{slug}/installations/new",
+                "account": app["owner"]["login"]}
 
     def installation(self):
+        owner = self.details()["owner"]["id"]
         installations = request("GET", "/app/installations?per_page=2", self.jwt())
-        if len(installations) != 1 or installations[0]["suspended_at"] is not None:
-            raise ProjectError("Установите выделенное GitHub App в одном аккаунте GitHub.")
-        return installations[0]["id"]
+        if len(installations) != 1 or installations[0]["account"]["id"] != owner:
+            raise ProjectError("Установите выделенное GitHub App в аккаунте владельца приложения.")
+        installation = installations[0]
+        if installation["suspended_at"] is not None or installation["repository_selection"] != "selected":
+            raise ProjectError("Включите установку GitHub App для выбранных репозиториев.")
+        return installation["id"]
 
     def token(self, installation, repository=None):
-        # The unscoped token is only used in this service to enumerate repositories.
-        body = {} if repository is None else {"repository_ids": [repository]}
-        token = request("POST", f"/app/installations/{installation}/access_tokens", self.jwt(), body)["token"]
+        path = f"/app/installations/{installation}"
+        jwt = self.jwt()
+        # Listing needs only metadata. A sandbox receives only Contents access
+        # for its repository, at the level currently granted to the installation.
+        body = {"permissions": {"metadata": "read"}}
+        if repository is not None:
+            contents = request("GET", path, jwt)["permissions"].get("contents")
+            if contents not in ("read", "write"):
+                raise ProjectError("GitHub App требуется разрешение Contents.")
+            body["permissions"]["contents"] = contents
+            body["repository_ids"] = [repository]
+        token = request("POST", path + "/access_tokens", jwt, body)["token"]
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,12000}", token):
             raise ProjectError(UNAVAILABLE)
         return token
@@ -109,7 +128,7 @@ class GitHubApp:
         while True:
             result = request("GET", f"/installation/repositories?per_page=100&page={page}", token)
             for repository in result["repositories"]:
-                if repository["private"] and numeric_id(repository["id"]) and repository_name(repository["full_name"]):
+                if repository["private"] and numeric_id(repository["id"]) and is_repository_name(repository["full_name"]):
                     yield {"id": repository["id"], "name": repository["full_name"]}
             if len(result["repositories"]) < 100:
                 break
@@ -175,7 +194,7 @@ class Projects:
             raise ProjectError(UNAVAILABLE)
         with self.lock, closing(self.db()) as db, db:
             old = db.execute("SELECT app, installation FROM connection").fetchone()
-            if old and old != (app.id, installation):
+            if old and old[0] != app.id:
                 if db.execute("SELECT 1 FROM project LIMIT 1").fetchone():
                     raise ProjectError("Перед сменой установки GitHub App удалите подключённые проекты.")
             db.execute("INSERT OR REPLACE INTO connection VALUES (1, ?, ?)", (app.id, installation))
@@ -204,12 +223,12 @@ class Projects:
         with self.lock, closing(self.db()) as db, db:
             if self.connection() != (app.id, installation):
                 raise ProjectError(INVALID_PROJECT)
-            row = db.execute("SELECT name, state FROM project WHERE id = ?", (repository,)).fetchone()
-            if row and row[1] in ("deleting", "delete_failed"):
+            row = db.execute("SELECT state FROM project WHERE id = ?", (repository,)).fetchone()
+            if row and row[0] in ("deleting", "delete_failed"):
                 raise ProjectError("Завершите удаление проекта перед повторным добавлением.")
-            if row and row[1] in ("creating", "ready"):
+            if row and row[0] in ("creating", "ready"):
                 return {}
-            name = row[0] if row else selected["name"]
+            name = selected["name"]
             db.execute("INSERT OR REPLACE INTO project VALUES (?, ?, 'creating')", (repository, name))
         self.jobs.submit(self.run_job, "create", repository, name)
         return {}
@@ -277,27 +296,12 @@ def message(stream):
     return data
 
 
-def root_action(data):
-    action, sandbox, repository = data.get("action"), data.get("sandbox"), data.get("repository")
-    if not isinstance(sandbox, str) or not SANDBOX.fullmatch(sandbox):
-        return {}
-    command = ["/usr/local/sbin/ai-sandbox"]
-    if action == "create" and repository_name(repository):
-        command += ["github-create", sandbox, repository]
-    elif action == "delete" and repository is None:
-        command += ["github-delete", sandbox]
-    else:
-        return {}
-    result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=880)
-    return {"ok": result.returncode == 0}
-
-
 def portal_request(projects, data):
     action = data.get("action")
     if action == "projects":
         return projects.list()
     if action == "app":
-        return {"install_url": projects.app().install_url()}
+        return projects.app().setup_page()
     if action == "connect":
         return projects.connect()
     if action == "repositories":
@@ -340,15 +344,10 @@ def serve(projects):
             Thread(target=reply, args=(connection,), daemon=True).start()
 
 
-def socket_request(mode, app):
+def credential_request(app):
     with socket.fromfd(0, socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        uid = peer_uid(connection)
-        data = message(sys.stdin.buffer)
-        if mode == "credential":
-            return credential(STATE, app, pwd.getpwuid(uid).pw_name, data.get("path"))
-        if mode == "provision" and uid == pwd.getpwnam("ai-github").pw_uid:
-            return root_action(data)
-        return {}
+        username = pwd.getpwuid(peer_uid(connection)).pw_name
+        return credential(STATE, app, username, message(sys.stdin.buffer).get("path"))
 
 
 def main():
@@ -360,8 +359,8 @@ def main():
         serve(Projects(STATE, app, provision))
         return
     try:
-        result = socket_request(mode, app)
-    except (ProjectError, HTTPException, OSError, KeyError, TypeError, ValueError, sqlite3.Error, subprocess.TimeoutExpired):
+        result = credential_request(app)
+    except (ProjectError, HTTPException, OSError, KeyError, TypeError, ValueError, sqlite3.Error):
         result = {}
     print(json.dumps(result), flush=True)
 

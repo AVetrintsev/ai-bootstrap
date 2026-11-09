@@ -19,6 +19,7 @@ user=aisbx-$project
 project_dir=/var/lib/ai-sandboxes/$project
 disk=$project_dir/disk
 home=$disk/home
+github_marker=$project_dir/github-managed
 unit=ai-bootstrap-sandbox.service
 github_socket=ai-bootstrap-git@$project.socket
 github_mounts=()
@@ -119,6 +120,13 @@ create_project() {
     nft list chain inet ai_bootstrap sandbox_route >/dev/null || die 'sandbox firewall is not loaded'
     exec 9>/run/lock/ai-bootstrap-sandbox.lock
     flock 9
+    if [[ ${#github_mounts[@]} != 0 && ! -f $github_marker ]]; then
+        if id "$user" >/dev/null 2>&1 || [[ -e $disk || -e $project_dir/disk.ext4 ]]; then
+            die 'project name is already used by a standalone sandbox'
+        fi
+        install -d -m 0711 "$project_dir"
+        : > "$github_marker"
+    fi
     if ! id "$user" >/dev/null 2>&1; then
         useradd --user-group --no-create-home --home-dir "$home" --shell /usr/sbin/nologin \
             -K "UID_MIN=$min_uid" -K "UID_MAX=$max_uid" "$user"
@@ -166,6 +174,10 @@ github_create() {
     create_project
     as_project podman exec --env DEBIAN_FRONTEND=noninteractive project /bin/bash -eu -c '
         url=https://github.com/$1.git
+        install -d /workspace
+        cd /workspace
+        exec 8>.ai-bootstrap-setup.lock
+        flock 8
         dpkg --configure -a
         if ! command -v git >/dev/null || ! command -v python3 >/dev/null || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
             apt-get -q update
@@ -173,10 +185,8 @@ github_create() {
         fi
         git config --system credential.https://github.com.useHttpPath true
         git config --system credential.https://github.com.helper /usr/local/lib/ai-bootstrap/github-credential
-        install -d /workspace
-        cd /workspace
         if [[ -d repo/.git ]]; then
-            [[ $(git -C repo config --local --get remote.origin.url) == "$url" ]]
+            git -C repo remote set-url origin "$url"
             exit
         fi
         if [[ -e repo || -L repo ]]; then
@@ -194,7 +204,16 @@ github_delete() {
     local mount_unit
     exec 9>/run/lock/ai-bootstrap-sandbox.lock
     flock 9
-    id "$user" >/dev/null 2>&1 || return 0
+    if [[ ! -f $github_marker ]]; then
+        if id "$user" >/dev/null 2>&1 || [[ -e $disk || -e $project_dir/disk.ext4 ]]; then
+            die 'refusing to delete a standalone sandbox'
+        fi
+        return 0
+    fi
+    if ! id "$user" >/dev/null 2>&1; then
+        [[ ! -e $project_dir/disk.ext4 ]] && ! mountpoint -q -- "$disk" || die 'project account is missing'
+        return 0
+    fi
     project_account
     loginctl disable-linger "$user"
     systemctl stop "user@$uid.service" "user-$uid.slice" "$github_socket"
@@ -208,7 +227,7 @@ github_delete() {
         "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" \
         "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf"
     systemctl daemon-reload
-    # Keep the UID reserved for this project. A later add recreates its disk.
+    userdel "$user"
 }
 
 case $action in

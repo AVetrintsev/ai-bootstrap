@@ -269,6 +269,7 @@ configure_github_projects() {
     service_account ai-github /var/lib/ai-github
     install -d -m 0755 "$libexec/github-sandbox"
     publish "$release/lib/github_projects.py" "$libexec/github_projects.py" 644
+    publish "$release/lib/github_provision.py" "$libexec/github_provision.py" 644
     publish "$release/lib/github-credential" "$libexec/github-sandbox/github-credential" 755
     local unit
     for unit in ai-bootstrap-github.socket ai-bootstrap-github.service \

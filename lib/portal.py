@@ -492,7 +492,9 @@ class Portal:
             return respond(start_response, HTTPStatus.SEE_OTHER, headers=(("Location", "/projects"),))
         if action == "app":
             url = escape(result["install_url"])
-            content = f"""<p><a href="{url}" target="_blank" rel="noopener noreferrer">
+            account = escape(result["account"])
+            content = f"""<p>Аккаунт GitHub <strong>{account}</strong></p>
+<p><a href="{url}" target="_blank" rel="noopener noreferrer">
 Установить GitHub App</a></p>
 <p>Разрешите приложению доступ к выбранным репозиториям, затем подтвердите подключение здесь.</p>
 <form method="post">{hidden}<button>Подтвердить подключение</button></form>{back}"""
@@ -506,8 +508,8 @@ class Portal:
             title = "Добавить проект"
         else:
             title = "Проекты"
-            link = ('<a href="/projects/add">Добавить проект</a>' if result["connected"]
-                    else '<a href="/github/connect">Подключить GitHub</a>')
+            link = ('<a href="/projects/add">Добавить проект</a> · <a href="/github/connect">Подключение GitHub</a>'
+                    if result["connected"] else '<a href="/github/connect">Подключить GitHub</a>')
             rows = "".join(self.project_row(project, hidden) for project in result["projects"])
             content = f'<p><a href="/">Главная</a></p><p>{link}</p><ul>{rows}</ul>'
         return respond(start_response, HTTPStatus.OK, html_page(title, content), "text/html; charset=utf-8")
