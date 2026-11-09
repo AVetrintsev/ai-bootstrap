@@ -1,0 +1,12 @@
+[Unit]
+Description=Persistent AI project sandbox
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/podman --default-mounts-file=/dev/null start --attach project
+ExecStop=/usr/bin/podman stop --ignore --time 5 project
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

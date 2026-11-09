@@ -10,6 +10,13 @@ import sys
 import yaml
 
 
+INTERNAL_NETWORKS = tuple(
+    ipaddress.IPv4Network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+SANDBOX_UID_MIN = 60001
+SANDBOX_UID_MAX = 60999
+
+
 class UniqueKeysLoader(yaml.SafeLoader):
     def construct_mapping(self, node, deep=False):
         self.flatten_mapping(node)
@@ -98,6 +105,27 @@ def validate_portal(portal):
     return transport
 
 
+def sandbox_internal_tcp(config):
+    endpoints = config.get("internal_tcp", [])
+    error = "sandbox.internal_tcp must list private IPv4 addresses with TCP ports other than 53 (IP:PORT)"
+    if not isinstance(endpoints, list):
+        raise ValueError(error)
+    rules = set()
+    for endpoint in endpoints:
+        if not isinstance(endpoint, str) or not re.fullmatch(r"[0-9.]+:[0-9]{1,5}", endpoint):
+            raise ValueError(error)
+        host, port = endpoint.split(":")
+        try:
+            address = ipaddress.IPv4Address(host)
+        except ValueError:
+            raise ValueError(error) from None
+        port = int(port)
+        if not any(address in network for network in INTERNAL_NETWORKS) or not 1 <= port <= 65535 or port == 53:
+            raise ValueError(error)
+        rules.add(f"{address} . {port}")
+    return f"elements = {{ {', '.join(sorted(rules))} }}" if rules else ""
+
+
 def stage(config_path, work):
     try:
         fd = os.open(config_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -123,13 +151,28 @@ def stage(config_path, work):
     transport = validate_portal(mapping(config.get("portal", {}), "portal"))
     profile = mapping(config.get("mihomo"), "mihomo").get("profile")
     validate_profile(profile)
+    sandbox_enabled = "sandbox" in config
+    internal_tcp = sandbox_internal_tcp(mapping(config.get("sandbox", {}), "sandbox"))
 
     template = Path(__file__).resolve().parent / "firewall.nft"
     rules = template.read_text(encoding="utf-8").replace("@ADMIN_IPV4@", ", ".join(map(str, networks)))
+    rules = rules.replace("@SANDBOX_UID_RANGE@", f"{SANDBOX_UID_MIN}-{SANDBOX_UID_MAX}")
+    rules = rules.replace("@SANDBOX_INTERNAL_TCP@", internal_tcp)
+    rules = rules.replace(
+        "@SANDBOX_ROUTE@", "jump sandbox_route" if sandbox_enabled else "drop"
+    ).replace(
+        "@SANDBOX_MIHOMO_GUARD@",
+        'meta skuid "ai-mihomo" meta nfproto ipv4 ct direction original jump mihomo_dial'
+        if sandbox_enabled else "",
+    )
     (work / "firewall.nft").write_text(rules, encoding="utf-8")
     (work / "admin-ipv4").write_text("\n".join(map(str, networks)), encoding="utf-8")
     (work / "profile.yaml").write_text(profile, encoding="utf-8")
     (work / "portal-transport").write_text(transport + "\n", encoding="utf-8")
+    enabled = "yes" if sandbox_enabled else "no"
+    (work / "sandbox-settings").write_text(
+        f"{enabled} {SANDBOX_UID_MIN} {SANDBOX_UID_MAX}\n", encoding="utf-8"
+    )
 
 
 def check_ssh(work):

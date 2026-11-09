@@ -64,6 +64,33 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("MATCH,REJECT", result.stderr)
         self.assertIsNone(profile)
 
+    def test_stages_only_explicit_internal_tcp_endpoints(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        result, firewall = self.stage(
+            example.replace("internal_tcp: []", "internal_tcp: ['10.2.3.4:8443']"), artifact="firewall.nft"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("elements = { 10.2.3.4 . 8443 }", firewall)
+
+    def test_rejects_public_or_metadata_addresses_in_the_internal_allowlist(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        for endpoint in ("1.1.1.1:443", "169.254.169.254:80", "10.0.0.1:65536", "10.0.0.1:53"):
+            with self.subTest(endpoint=endpoint):
+                result, firewall = self.stage(
+                    example.replace("internal_tcp: []", f"internal_tcp: ['{endpoint}']"), artifact="firewall.nft"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("sandbox.internal_tcp", result.stderr)
+                self.assertIsNone(firewall)
+
+    def test_existing_config_keeps_its_mihomo_routes_until_sandboxes_are_enabled(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        existing = example.split("sandbox:\n")[0] + "mihomo:\n" + example.split("mihomo:\n")[1]
+        result, firewall = self.stage(existing, artifact="firewall.nft")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("jump mihomo_dial", firewall)
+        self.assertIn("meta skuid 60001-60999 drop", firewall)
+
 
 if __name__ == "__main__":
     unittest.main()

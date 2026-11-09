@@ -77,6 +77,7 @@ preflight() {
     reason=$(python3 -I "$release/lib/config.py" "$config" "$work" 2>&1) ||
         fail "${reason%%$'\n'*}"
     read -r portal_transport < "$work/portal-transport"
+    read -r sandbox_enabled _ < "$work/sandbox-settings"
     [[ $(readlink -f /etc/resolv.conf) == /run/systemd/resolve/stub-resolv.conf ]] ||
         fail 'expected /etc/resolv.conf to use the systemd-resolved stub'
     quiet 'systemd-resolved must be running' systemctl is-active --quiet systemd-resolved.service
@@ -176,7 +177,7 @@ PubkeyAuthentication yes
 AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-DenyUsers ai-mihomo ai-portal
+DenyUsers ai-mihomo ai-portal aisbx-*
 # END AI BOOTSTRAP SSH
 EOF
         sed '/^# BEGIN AI BOOTSTRAP SSH$/,/^# END AI BOOTSTRAP SSH$/d' "$work/ssh-original"
@@ -241,6 +242,19 @@ verify_egress() {
     quiet 'DNS query through mihomo failed' timeout 20 resolvectl query -4 example.com
     quiet 'HTTPS check through mihomo failed' curl -q --noproxy '*' -4 --fail --silent \
         --connect-timeout 10 --max-time 20 https://example.com/
+}
+
+sandbox_packages() {
+    ensure_packages dbus-user-session e2fsprogs fuse-overlayfs podman slirp4netns uidmap
+}
+
+configure_sandbox() {
+    install -d -m 0711 /var/lib/ai-sandboxes
+    install -d -m 0755 /etc/systemd/user
+    publish "$release/release.env" "$etc/sandbox-release.env" 600
+    publish "$release/lib/sandbox.sh" /usr/local/sbin/ai-sandbox 755
+    publish "$release/lib/ai-bootstrap-sandbox.service" /etc/systemd/user/ai-bootstrap-sandbox.service 644
+    publish "$work/sandbox-settings" "$etc/sandbox-settings" 600
 }
 
 portal_admin() {
@@ -329,6 +343,10 @@ run_step configure_ssh
 run_step configure_firewall
 run_step configure_mihomo
 run_step verify_egress
+if [[ $sandbox_enabled == yes ]]; then
+    run_step sandbox_packages
+fi
+run_step configure_sandbox
 if [[ $portal_transport == local-http ]]; then
     run_step portal_packages
     run_step configure_portal
