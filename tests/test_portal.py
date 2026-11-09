@@ -3,6 +3,7 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from io import BytesIO, StringIO
+from itertools import chain
 from pathlib import Path
 import re
 import sqlite3
@@ -56,7 +57,13 @@ class PortalTest(unittest.TestCase):
             result.extend((int(status.split()[0]), dict(headers)))
 
         body = self.portal(environ, start_response)
-        return *result, body if streaming else b"".join(body)
+        if streaming:
+            iterator = iter(body)
+            first = next(iterator)
+            self.addCleanup(iterator.close)
+            return *result, chain((first,), iterator)
+        data = b"".join(body)
+        return *result, data
 
     def code(self, secret):
         # Independent RFC 4226 calculation as an authenticator would perform it.

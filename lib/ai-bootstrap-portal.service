@@ -7,6 +7,7 @@ After=ai-bootstrap-portal.socket
 User=ai-portal
 Group=ai-portal
 WorkingDirectory=/usr/local/libexec/ai-bootstrap
+# Keep the thread count above STREAM_SLOTS in portal.py.
 ExecStart=/usr/bin/gunicorn --workers 2 --threads 4 portal:application
 Restart=on-failure
 StateDirectory=ai-portal

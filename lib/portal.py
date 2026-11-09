@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+from threading import BoundedSemaphore
 import time
 from urllib.parse import parse_qs, quote
 
@@ -37,6 +38,8 @@ ACTIVATION_LIFETIME = 24 * HOUR
 SESSION_LIFETIME = 30 * ACTIVATION_LIFETIME
 FAILURE_LIMIT = 3
 STREAM_CHECK_INTERVAL = 1
+# Gunicorn runs four threads per worker. Reserve capacity for portal requests.
+STREAM_SLOTS = BoundedSemaphore(3)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS owner (
@@ -242,13 +245,13 @@ class OwnerAccess:
             ).fetchall()
             return link, browsers
 
-    def change_browser(self, token_hash, browser_hash, *, name):
+    def change_browser(self, token_hash, browser_hash, action, name):
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             now = int(self.clock())
             if not self.active_session(db, token_hash, now):
-                return False
-            if name is None:
+                return False, False
+            if action == "revoke":
                 changed = db.execute(
                     "DELETE FROM sessions WHERE token_hash = ? AND expires_at > ?",
                     (browser_hash, now),
@@ -259,9 +262,11 @@ class OwnerAccess:
                     (name, browser_hash, now),
                 )
             if not changed.rowcount:
-                return False
-            self.renew_session(db, token_hash, now)
-            return True
+                return False, False
+            current_revoked = action == "revoke" and token_hash == browser_hash
+            if not current_revoked:
+                self.renew_session(db, token_hash, now)
+            return True, not current_revoked
 
 
 def session_cookie(header):
@@ -385,23 +390,32 @@ class Portal:
                 if path == "/api/status":
                     return respond(start_response, HTTPStatus.OK, '{"status":"ok"}\n', "application/json")
                 if path == "/api/test-stream":
-                    start_response("200 OK", [
-                        ("Content-Type", "text/event-stream"),
-                        ("Cache-Control", "no-store"),
-                    ])
-                    return self.stream(session)
+                    return self.stream(start_response, session)
 
         return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
 
-    def stream(self, session):
-        yield b"data: ready\n\n"
-        while True:
-            time.sleep(STREAM_CHECK_INTERVAL)
-            # Nginx checks only the initial request. Poll SQLite so revocation
-            # from another worker or the admin command closes this connection.
+    def stream(self, start_response, session):
+        if not STREAM_SLOTS.acquire(blocking=False):
+            yield from respond(start_response, HTTPStatus.SERVICE_UNAVAILABLE, "Stream limit reached\n")
+            return
+        try:
             if not self.owner.has_session(session):
+                yield from respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
                 return
-            yield b": keepalive\n\n"
+            start_response("200 OK", [
+                ("Content-Type", "text/event-stream"),
+                ("Cache-Control", "no-store"),
+            ])
+            yield b"data: ready\n\n"
+            while True:
+                time.sleep(STREAM_CHECK_INTERVAL)
+                # Nginx checks only the initial request. Poll SQLite so revocation
+                # from another worker or the admin command closes this connection.
+                if not self.owner.has_session(session):
+                    return
+                yield b": keepalive\n\n"
+        finally:
+            STREAM_SLOTS.release()
 
     def cookie(self, session, lifetime=SESSION_LIFETIME):
         value = f"ai_session={session}; Path=/; Max-Age={lifetime}; HttpOnly; SameSite=Strict"
@@ -431,16 +445,17 @@ class Portal:
         if not hmac.compare_digest(form.get("csrf", "").encode(), csrf_token(session).encode()):
             return respond(start_response, HTTPStatus.FORBIDDEN, "Недействительная форма.\n")
 
-        name = None
+        name = ""
         if action == "rename":
             name = form.get("name", "").strip()
             if not 0 < len(name) <= BROWSER_NAME_LIMIT or not name.isprintable():
                 return respond(start_response, HTTPStatus.BAD_REQUEST, "Укажите имя браузера.\n")
         browser_hash = bytes.fromhex(browser_id)
         current_hash = digest(session)
-        if not self.owner.change_browser(current_hash, browser_hash, name=name):
+        changed, renewed = self.owner.change_browser(current_hash, browser_hash, action, name)
+        if not changed:
             return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
-        cookie = self.cookie("", 0) if name is None and current_hash == browser_hash else self.cookie(session)
+        cookie = self.cookie(session) if renewed else self.cookie("", 0)
         return respond(start_response, HTTPStatus.SEE_OTHER, headers=(("Location", "/"), cookie))
 
     def registration(self, environ, start_response, token):
