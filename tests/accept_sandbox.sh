@@ -70,9 +70,12 @@ check_isolation() {
         uid=$(id -u "aisbx-$project")
         [[ $uid -ge $min_uid && $uid -le $max_uid ]]
         user=aisbx-$project
-        pid=$(runuser -u "$user" -- env -i PATH=/usr/bin:/bin \
-            HOME="/var/lib/ai-sandboxes/$project/disk/home" XDG_RUNTIME_DIR="/run/user/$uid" \
-            podman inspect --format '{{.State.Pid}}' project)
+        pid=$(
+            cd /
+            runuser -u "$user" -- env -i PATH=/usr/bin:/bin \
+                HOME="/var/lib/ai-sandboxes/$project/disk/home" XDG_RUNTIME_DIR="/run/user/$uid" \
+                podman inspect --format '{{.State.Pid}}' project
+        )
         [[ $(awk '/^Uid:/ {print $2}' "/proc/$pid/status") == "$uid" ]]
         grep -q "^0::/user.slice/user-$uid.slice/" "/proc/$pid/cgroup"
         slice=/sys/fs/cgroup/user.slice/user-$uid.slice
