@@ -8,6 +8,7 @@ import hmac
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from io import BytesIO
+import os
 from pathlib import Path
 import re
 import secrets
@@ -24,6 +25,9 @@ STATE = Path("/var/lib/ai-portal")
 KEY = Path("/etc/ai-bootstrap/portal.key")
 OWNER_PREFIX = "/_owner/"
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
+TOTP_DIGITS = 6
+TOTP_PERIOD = 30
+CODE = re.compile(rf"[0-9]{{{TOTP_DIGITS}}}")
 HOUR = 60 * 60
 ACTIVATION_LIFETIME = 24 * HOUR
 SESSION_LIFETIME = 30 * ACTIVATION_LIFETIME
@@ -57,7 +61,7 @@ def totp(secret, counter):
     mac = hmac.digest(secret, counter.to_bytes(8, "big"), "sha1")
     offset = mac[-1] & 15
     value = int.from_bytes(mac[offset:offset + 4], "big") & 0x7fffffff
-    return f"{value % 1_000_000:06d}"
+    return f"{value % (10 ** TOTP_DIGITS):0{TOTP_DIGITS}d}"
 
 
 class OwnerAccess:
@@ -143,24 +147,26 @@ class OwnerAccess:
             if any(count >= FAILURE_LIMIT for count in failures):
                 return HTTPStatus.TOO_MANY_REQUESTS, None
 
-            counter = now // 30
+            counter = now // TOTP_PERIOD
             secret = self.cipher.decrypt(owner["secret"])
             last_counter = owner["last_counter"]
-            # A code from the previous step may still be in transit.
-            for candidate in (counter, counter - 1):
-                if hmac.compare_digest(totp(secret, candidate), code):
-                    if last_counter is None or candidate > last_counter:
-                        session = secrets.token_urlsafe(32)
-                        db.execute(
-                            "UPDATE owner SET activation = NULL, last_counter = ? WHERE id = 1",
-                            (candidate,),
-                        )
-                        db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
-                        db.execute(
-                            "INSERT INTO sessions VALUES (?, ?)", (digest(session), now + SESSION_LIFETIME)
-                        )
-                        return HTTPStatus.SEE_OTHER, session
-                    break
+            # A code from the previous step may still be in transit. If two
+            # adjacent steps share a code, neither may have been used already.
+            matches = [
+                step for step in (counter, counter - 1)
+                if hmac.compare_digest(totp(secret, step), code)
+            ]
+            if matches and (last_counter is None or min(matches) > last_counter):
+                session = secrets.token_urlsafe(32)
+                db.execute(
+                    "UPDATE owner SET activation = NULL, last_counter = ? WHERE id = 1",
+                    (matches[0],),
+                )
+                db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
+                db.execute(
+                    "INSERT INTO sessions VALUES (?, ?)", (digest(session), now + SESSION_LIFETIME)
+                )
+                return HTTPStatus.SEE_OTHER, session
 
             db.execute("INSERT INTO failures VALUES (?, ?)", (now, ip))
             return HTTPStatus.BAD_REQUEST, None
@@ -194,7 +200,7 @@ def submitted_code(environ):
     except (ValueError, UnicodeError):
         return ""
     values = form.get("code", [])
-    return values[0] if len(values) == 1 and re.fullmatch(r"[0-9]{6}", values[0]) else ""
+    return values[0] if len(values) == 1 and CODE.fullmatch(values[0]) else ""
 
 
 def respond(start_response, status, body="", content_type="text/plain; charset=utf-8", headers=()):
@@ -223,7 +229,10 @@ def html_page(title, content):
 def enrollment_qr(secret):
     encoded = base64.b32encode(secret).decode("ascii")
     label = quote("ai-bootstrap:owner")
-    uri = f"otpauth://totp/{label}?secret={encoded}&issuer=ai-bootstrap&digits=6&period=30"
+    uri = (
+        f"otpauth://totp/{label}?secret={encoded}&issuer=ai-bootstrap"
+        f"&digits={TOTP_DIGITS}&period={TOTP_PERIOD}"
+    )
     output = BytesIO()
     qrcode.make(uri, image_factory=SvgPathFillImage).save(output)
     qr = base64.b64encode(output.getvalue()).decode("ascii")
@@ -290,9 +299,9 @@ class Portal:
             if kind:
                 title = "Активировать владельца" if secret else "Зарегистрировать браузер"
                 intro = enrollment_qr(secret) if secret else ""
-                form = """<form method="post">
+                form = f"""<form method="post">
 <label>Шестизначный код <input name="code" type="text" inputmode="numeric"
-autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
+autocomplete="one-time-code" pattern="{CODE.pattern}" maxlength="{TOTP_DIGITS}" required></label>
 <button>Подтвердить</button></form>"""
                 return respond(start_response, HTTPStatus.OK, html_page(title, intro + form),
                                "text/html; charset=utf-8")
@@ -300,9 +309,9 @@ autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></label>
         return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
 
 
-def print_activation_url(portal, base_url):
-    portal.owner.initialize()
-    path = portal.owner.provision()
+def print_activation_url(owner, base_url):
+    owner.initialize()
+    path = owner.provision()
     if path:
         print(base_url + path)
 
@@ -315,16 +324,17 @@ def application(environ, start_response):
 
 
 def main():
+    os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("activation").add_argument("base_url")
     args = parser.parse_args()
-    portal = Portal(STATE, KEY.read_bytes())
+    owner = OwnerAccess(STATE, KEY.read_bytes(), time.time)
     if args.command == "init":
-        portal.owner.initialize()
+        owner.initialize()
     else:
-        print_activation_url(portal, args.base_url)
+        print_activation_url(owner, args.base_url)
 
 
 if __name__ == "__main__":

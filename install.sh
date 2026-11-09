@@ -95,11 +95,11 @@ ensure_packages() {
         fi
     done
     if (( ${#missing[@]} == 0 )); then
-        skip_reason='base packages are installed'
+        skip_reason='required packages are installed'
         return
     fi
     quiet 'could not refresh package indexes' apt-get -q update
-    quiet 'could not install base packages' apt-get -qy --no-install-recommends install "${missing[@]}"
+    quiet 'could not install required packages' apt-get -qy --no-install-recommends install "${missing[@]}"
 }
 
 packages() {
@@ -247,10 +247,11 @@ portal_admin() {
     runuser -u ai-portal -- /usr/bin/python3 -I "$libexec/portal.py" "$@"
 }
 
-configure_portal() {
+portal_packages() {
     ensure_packages gunicorn python3-cryptography python3-qrcode
-    # Report the configuration step even if dependencies were already installed.
-    skip_reason=
+}
+
+configure_portal() {
     service_account ai-portal "$portal_state"
     install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
     if [[ ! -e $etc/portal.key ]]; then
@@ -309,6 +310,9 @@ show_activation() {
     local base_url=$1
     if [[ -t 1 ]]; then
         portal_admin activation "$base_url" 2>/dev/null || fail 'could not prepare owner activation'
+    elif { : > /dev/tty; } 2>/dev/null; then
+        portal_admin activation "$base_url" > /dev/tty 2>/dev/null ||
+            fail 'could not prepare owner activation'
     else
         quiet 'could not prepare owner activation' portal_admin activation "$base_url"
         printf '%s\n' 'To display any pending activation URL in a private terminal, run:' \
@@ -326,6 +330,7 @@ run_step configure_firewall
 run_step configure_mihomo
 run_step verify_egress
 if [[ $portal_transport == local-http ]]; then
+    run_step portal_packages
     run_step configure_portal
     run_step configure_local_http
     run_step verify_local_http

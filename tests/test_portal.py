@@ -30,7 +30,7 @@ class PortalTest(unittest.TestCase):
     def activation(self, base="http://localhost:8080"):
         output = StringIO()
         with redirect_stdout(output):
-            print_activation_url(self.portal, base)
+            print_activation_url(self.portal.owner, base)
         return output.getvalue().strip()
 
     def request(self, path, *, form=None, cookie="", ip="192.0.2.1"):
