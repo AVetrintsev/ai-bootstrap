@@ -257,3 +257,29 @@ class PortalTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(page.count(b"2023-11-14 22:13:30 UTC"), 2)
         self.assertIn(b"2023-12-14 22:13:30 UTC", page)
+
+    def test_open_stream_closes_after_revocation(self):
+        cookie, _, _ = self.enroll()
+        status, _, stream = self.request("/api/test-stream", cookie=cookie, streaming=True)
+        self.assertEqual(status, 200)
+        self.assertEqual(next(iter(stream)), b"data: ready\n\n")
+
+        csrf, (rename,) = self.browser_forms(self.request("/", cookie=cookie)[2])
+        revoke = rename.removesuffix("rename") + "revoke"
+        status, headers, _ = self.request(revoke, cookie=cookie, form={"csrf": csrf})
+        self.assertEqual(status, 303)
+        self.assertIn("Max-Age=0", headers["Set-Cookie"])
+        self.assertEqual(list(stream), [])
+        self.assertEqual(self.request("/api/test-stream", cookie=cookie)[0], 404)
+
+    def test_open_stream_closes_at_expiry_without_renewal(self):
+        cookie, _, _ = self.enroll()
+        self.time += 29 * 86400
+        status, headers, stream = self.request("/api/test-stream", cookie=cookie, streaming=True)
+        self.assertEqual(status, 200)
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertEqual(next(iter(stream)), b"data: ready\n\n")
+
+        self.time += 86400
+        self.assertEqual(list(stream), [])
+        self.assertEqual(self.request("/api/test-stream", cookie=cookie)[0], 404)

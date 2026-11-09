@@ -36,6 +36,7 @@ HOUR = 60 * 60
 ACTIVATION_LIFETIME = 24 * HOUR
 SESSION_LIFETIME = 30 * ACTIVATION_LIFETIME
 FAILURE_LIMIT = 3
+STREAM_CHECK_INTERVAL = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS owner (
@@ -388,9 +389,19 @@ class Portal:
                         ("Content-Type", "text/event-stream"),
                         ("Cache-Control", "no-store"),
                     ])
-                    return [b"data: ready\n\n", b"data: done\n\n"]
+                    return self.stream(session)
 
         return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
+
+    def stream(self, session):
+        yield b"data: ready\n\n"
+        while True:
+            time.sleep(STREAM_CHECK_INTERVAL)
+            # Nginx checks only the initial request. Poll SQLite so revocation
+            # from another worker or the admin command closes this connection.
+            if not self.owner.has_session(session):
+                return
+            yield b": keepalive\n\n"
 
     def cookie(self, session, lifetime=SESSION_LIFETIME):
         value = f"ai_session={session}; Path=/; Max-Age={lifetime}; HttpOnly; SameSite=Strict"
