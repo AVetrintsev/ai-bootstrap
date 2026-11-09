@@ -87,8 +87,14 @@ check_isolation() {
             /run/podman/podman.sock "/run/user/$uid/podman/podman.sock"; do
             deny ai-sandbox shell "$project" test -e "$path"
         done
-        deny ai-sandbox shell "$project" fallocate -l 5G /tmp/ai-bootstrap-oversized
-        ai-sandbox shell "$project" rm -f /tmp/ai-bootstrap-oversized
+        ai-sandbox shell "$project" bash -c '
+            file=$(mktemp)
+            trap '\''rm -f -- "$file"'\'' EXIT
+            if fallocate -l 5G "$file"; then
+                echo "Project disk accepted a 5 GiB file" >&2
+                exit 1
+            fi
+        '
     done
     [[ $(id -u "aisbx-$first") != "$(id -u "aisbx-$second")" ]]
     deny ai-sandbox shell "$second" test -e "$marker"
