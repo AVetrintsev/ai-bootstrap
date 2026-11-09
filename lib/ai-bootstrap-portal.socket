@@ -1,0 +1,10 @@
+[Unit]
+Description=AI Bootstrap portal socket
+
+[Socket]
+ListenStream=/run/ai-bootstrap-portal.sock
+SocketGroup=www-data
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

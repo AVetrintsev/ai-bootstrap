@@ -43,6 +43,10 @@ cache=/var/lib/ai-bootstrap
 state=/var/lib/ai-mihomo
 firewall_unit=ai-bootstrap-firewall.service
 mihomo_unit=ai-bootstrap-mihomo.service
+portal_service=ai-bootstrap-portal.service
+portal_socket=ai-bootstrap-portal.socket
+portal_state=/var/lib/ai-portal
+local_portal_url=http://localhost:8080
 
 preflight() {
     [[ $EUID == 0 ]] || fail 'run as root'
@@ -82,10 +86,10 @@ preflight() {
         fail "${reason%%$'\n'*}"
 }
 
-packages() {
+ensure_packages() {
     local package
     local -a missing=()
-    for package in ca-certificates curl gzip iproute2 nftables openssh-server procps; do
+    for package in "$@"; do
         if [[ $(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null) != installed ]]; then
             missing+=("$package")
         fi
@@ -98,16 +102,24 @@ packages() {
     quiet 'could not install base packages' apt-get -qy --no-install-recommends install "${missing[@]}"
 }
 
-directories() {
-    if ! id ai-mihomo >/dev/null 2>&1; then
-        quiet 'could not create the service account' useradd --system --user-group --no-create-home \
-            --home-dir /var/lib/ai-mihomo --shell /usr/sbin/nologin ai-mihomo
+packages() {
+    ensure_packages ca-certificates curl gzip iproute2 nftables openssh-server procps
+}
+
+service_account() {
+    local user=$1 home=$2 account
+    if ! id "$user" >/dev/null 2>&1; then
+        quiet "could not create $user" useradd --system --user-group --no-create-home \
+            --home-dir "$home" --shell /usr/sbin/nologin "$user"
     fi
-    local account
-    account=$(getent passwd ai-mihomo)
-    [[ $(id -u ai-mihomo) -gt 0 && $(id -u ai-mihomo) -lt 1000 &&
-       $(id -gn ai-mihomo) == ai-mihomo && $account == *:/var/lib/ai-mihomo:/usr/sbin/nologin ]] ||
-        fail 'existing ai-mihomo account is incompatible'
+    account=$(getent passwd "$user")
+    [[ $(id -u "$user") -gt 0 && $(id -u "$user") -lt 1000 &&
+       $(id -gn "$user") == "$user" && $account == *:"$home":/usr/sbin/nologin ]] ||
+        fail "existing $user account is incompatible"
+}
+
+directories() {
+    service_account ai-mihomo "$state"
     install -d -m 0700 "$cache"
     install -d -m 0755 "$etc" "$libexec" /etc/systemd/resolved.conf.d
     chgrp ai-mihomo "$work"
@@ -164,7 +176,7 @@ PubkeyAuthentication yes
 AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-DenyUsers ai-mihomo
+DenyUsers ai-mihomo ai-portal
 # END AI BOOTSTRAP SSH
 EOF
         sed '/^# BEGIN AI BOOTSTRAP SSH$/,/^# END AI BOOTSTRAP SSH$/d' "$work/ssh-original"
@@ -231,6 +243,34 @@ verify_egress() {
         --connect-timeout 10 --max-time 20 https://example.com/
 }
 
+portal_admin() {
+    runuser -u ai-portal -- /usr/bin/python3 -I "$libexec/portal.py" "$@"
+}
+
+configure_portal() {
+    ensure_packages gunicorn python3-cryptography python3-qrcode
+    # Report the configuration step even if dependencies were already installed.
+    skip_reason=
+    service_account ai-portal "$portal_state"
+    install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
+    if [[ ! -e $etc/portal.key ]]; then
+        [[ ! -e $portal_state/portal.sqlite3 ]] || fail 'restore the portal encryption key'
+        head -c 32 /dev/urandom > "$work/portal.key"
+        publish "$work/portal.key" "$etc/portal.key" 640 ai-portal
+    fi
+    [[ -f $etc/portal.key && ! -L $etc/portal.key &&
+       $(stat -c '%a:%U:%G:%s' "$etc/portal.key") == '640:root:ai-portal:32' ]] ||
+        fail 'unexpected portal encryption key permissions or size'
+
+    publish "$release/lib/portal.py" "$libexec/portal.py" 644
+    quiet 'could not initialize portal state' portal_admin init
+    publish "$release/lib/$portal_service" "/etc/systemd/system/$portal_service" 644
+    publish "$release/lib/$portal_socket" "/etc/systemd/system/$portal_socket" 644
+    quiet 'could not load the portal units' systemctl daemon-reload
+    quiet 'could not enable the portal socket' systemctl enable --now "$portal_socket"
+    quiet 'could not start the portal' systemctl restart "$portal_service"
+}
+
 configure_local_http() {
     local unit=nginx.service dropin=/etc/systemd/system/nginx.service.d
     local nginx_config=$release/lib/nginx-local-http.conf
@@ -253,14 +293,27 @@ configure_local_http() {
 }
 
 verify_local_http() {
-    local listeners response
+    local listeners path status
     listeners=$(ss -Hltnp | awk '/"nginx"/ {print $4}')
     [[ $listeners == '127.0.0.1:8080' ]] ||
         fail 'expected nginx to listen only on 127.0.0.1:8080'
-    response=$(curl -q --noproxy '*' --fail --silent --max-time 10 --write-out '%{http_code}' \
-        http://127.0.0.1:8080/) || fail 'could not reach nginx on 127.0.0.1:8080'
-    [[ $response == $'ai-bootstrap local HTTP\n200' ]] ||
-        fail 'unexpected HTTP response from 127.0.0.1:8080'
+    for path in / /api/status /api/test-stream; do
+        status=$(curl -q --noproxy '*' --silent --max-time 10 --output /dev/null \
+            --write-out '%{http_code}' "http://127.0.0.1:8080$path") ||
+            fail 'could not reach nginx on 127.0.0.1:8080'
+        [[ $status == 404 ]] || fail "expected a 404 for anonymous access to $path"
+    done
+}
+
+show_activation() {
+    local base_url=$1
+    if [[ -t 1 ]]; then
+        portal_admin activation "$base_url" 2>/dev/null || fail 'could not prepare owner activation'
+    else
+        quiet 'could not prepare owner activation' portal_admin activation "$base_url"
+        printf '%s\n' 'To display any pending activation URL in a private terminal, run:' \
+            "  sudo runuser -u ai-portal -- /usr/bin/python3 -I $libexec/portal.py activation $base_url"
+    fi
 }
 
 run_step preflight
@@ -273,6 +326,7 @@ run_step configure_firewall
 run_step configure_mihomo
 run_step verify_egress
 if [[ $portal_transport == local-http ]]; then
+    run_step configure_portal
     run_step configure_local_http
     run_step verify_local_http
     skip_step public_dns 'local-http needs no public DNS'
@@ -280,5 +334,7 @@ if [[ $portal_transport == local-http ]]; then
     skip_step globalping 'local-http has no public web endpoint'
     printf '%s\n' 'From an allowed administrator address, run:' \
         '  ssh -4 -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8080:127.0.0.1:8080 USER@AI_HOST' \
-        'Open http://localhost:8080 in your browser.'
+        'Open the owner activation URL in your browser. If already activated, use http://localhost:8080.'
+    step=owner_activation
+    show_activation "$local_portal_url"
 fi
