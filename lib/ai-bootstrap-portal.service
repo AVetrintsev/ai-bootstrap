@@ -1,0 +1,22 @@
+[Unit]
+Description=AI Bootstrap portal
+Requires=ai-bootstrap-portal.socket
+After=ai-bootstrap-portal.socket
+
+[Service]
+User=ai-portal
+Group=ai-portal
+WorkingDirectory=/usr/local/libexec/ai-bootstrap
+ExecStart=/usr/bin/gunicorn --workers 2 --threads 4 portal:application
+Restart=on-failure
+StateDirectory=ai-portal
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+# Request paths contain enrollment tokens and must not reach the journal.
+StandardOutput=null
+StandardError=null
