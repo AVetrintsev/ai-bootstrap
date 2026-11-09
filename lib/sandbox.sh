@@ -13,6 +13,7 @@ action=$1
 project=$2
 shift 2
 [[ $project =~ ^[a-z][a-z0-9-]{0,23}$ ]] || die 'invalid project name'
+cd /
 
 user=aisbx-$project
 project_dir=/var/lib/ai-sandboxes/$project
