@@ -90,18 +90,28 @@ class OwnerAccess:
                 return None
             if owner and owner["activation_expires"] > now:
                 return OWNER_PREFIX + self.cipher.decrypt(owner["activation"]).decode("ascii")
-            activation = secrets.token_urlsafe(32)
-            db.execute(
-                """INSERT OR REPLACE INTO owner (id, secret, activation, activation_expires, registration)
-                   VALUES (1, ?, ?, ?, ?)""",
-                (
-                    self.cipher.encrypt(secrets.token_bytes(20)),
-                    self.cipher.encrypt(activation.encode("ascii")),
-                    now + ACTIVATION_LIFETIME,
-                    self.cipher.encrypt(secrets.token_urlsafe(32).encode("ascii")),
-                ),
-            )
-            return OWNER_PREFIX + activation
+            return self.issue_activation(db, now)
+
+    def issue_activation(self, db, now):
+        activation = secrets.token_urlsafe(32)
+        db.execute(
+            """INSERT OR REPLACE INTO owner (id, secret, activation, activation_expires, registration)
+               VALUES (1, ?, ?, ?, ?)""",
+            (
+                self.cipher.encrypt(secrets.token_bytes(20)),
+                self.cipher.encrypt(activation.encode("ascii")),
+                now + ACTIVATION_LIFETIME,
+                self.cipher.encrypt(secrets.token_urlsafe(32).encode("ascii")),
+            ),
+        )
+        return OWNER_PREFIX + activation
+
+    def recover(self):
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM sessions")
+            db.execute("DELETE FROM failures")
+            return self.issue_activation(db, int(self.clock()))
 
     def registration_kind(self, owner, token, now):
         if owner is None:
@@ -130,6 +140,15 @@ class OwnerAccess:
             if owner:
                 return OWNER_PREFIX + self.cipher.decrypt(owner["registration"]).decode("ascii")
             return None
+
+    def rotate_registration(self):
+        with closing(self.connect()) as db, db:
+            token = secrets.token_urlsafe(32)
+            updated = db.execute(
+                "UPDATE owner SET registration = ? WHERE id = 1 AND activation IS NULL",
+                (self.cipher.encrypt(token.encode("ascii")),),
+            )
+            return OWNER_PREFIX + token if updated.rowcount else None
 
     def register(self, token, code, ip):
         # Serialize lookup, rate limits, TOTP consumption and session issuance across workers.
@@ -323,18 +342,29 @@ def application(environ, start_response):
     return portal(environ, start_response)
 
 
-def main():
+def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("activation").add_argument("base_url")
-    args = parser.parse_args()
+    commands.add_parser("recover").add_argument("base_url")
+    commands.add_parser("rotate-registration").add_argument("base_url")
+    args = parser.parse_args(argv)
     owner = OwnerAccess(STATE, KEY.read_bytes(), time.time)
     if args.command == "init":
         owner.initialize()
-    else:
+    elif args.command == "activation":
         print_activation_url(owner, args.base_url)
+    elif args.command == "recover":
+        owner.initialize()
+        print(args.base_url + owner.recover())
+    else:
+        owner.initialize()
+        path = owner.rotate_registration()
+        if path is None:
+            parser.exit(1, "Сначала активируйте владельца.\n")
+        print(args.base_url + path)
 
 
 if __name__ == "__main__":
