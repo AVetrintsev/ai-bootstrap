@@ -77,6 +77,7 @@ preflight() {
     reason=$(python3 -I "$release/lib/config.py" "$config" "$work" 2>&1) ||
         fail "${reason%%$'\n'*}"
     read -r portal_transport < "$work/portal-transport"
+    read -r sandbox_enabled _ < "$work/sandbox-settings"
     [[ $(readlink -f /etc/resolv.conf) == /run/systemd/resolve/stub-resolv.conf ]] ||
         fail 'expected /etc/resolv.conf to use the systemd-resolved stub'
     quiet 'systemd-resolved must be running' systemctl is-active --quiet systemd-resolved.service
@@ -253,6 +254,7 @@ configure_sandbox() {
     publish "$release/release.env" "$etc/sandbox-release.env" 600
     publish "$release/lib/sandbox.sh" /usr/local/sbin/ai-sandbox 755
     publish "$release/lib/ai-bootstrap-sandbox.service" /etc/systemd/user/ai-bootstrap-sandbox.service 644
+    publish "$work/sandbox-settings" "$etc/sandbox-settings" 600
 }
 
 portal_admin() {
@@ -341,7 +343,9 @@ run_step configure_ssh
 run_step configure_firewall
 run_step configure_mihomo
 run_step verify_egress
-run_step sandbox_packages
+if [[ $sandbox_enabled == yes ]]; then
+    run_step sandbox_packages
+fi
 run_step configure_sandbox
 if [[ $portal_transport == local-http ]]; then
     run_step portal_packages

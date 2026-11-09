@@ -20,11 +20,12 @@ project_dir=/var/lib/ai-sandboxes/$project
 disk=$project_dir/disk
 home=$disk/home
 unit=ai-bootstrap-sandbox.service
+read -r enabled min_uid max_uid < /etc/ai-bootstrap/sandbox-settings
 
 project_account() {
     uid=$(id -u "$user") || die 'unknown project'
-    [[ $uid -ge 61000 && $uid -le 61999 &&
-       $(id -g "$user") == "$uid" &&
+    gid=$(id -g "$user")
+    [[ $uid -ge $min_uid && $uid -le $max_uid && $(id -gn "$user") == "$user" &&
        $(getent passwd "$user") == *:"$home":/usr/sbin/nologin ]] || die 'incompatible project account'
 }
 
@@ -32,6 +33,18 @@ as_project() {
     runuser -u "$user" -- env -i PATH=/usr/bin:/bin HOME="$home" USER="$user" \
         TERM="${TERM:-dumb}" XDG_RUNTIME_DIR="/run/user/$uid" \
         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" "$@"
+}
+
+publish_unit() {
+    local target=$1 staged
+    staged=$(mktemp "${target}.XXXXXX")
+    cat > "$staged"
+    if cmp -s -- "$staged" "$target"; then
+        rm -- "$staged"
+    else
+        chmod 0644 "$staged"
+        mv -fT -- "$staged" "$target"
+    fi
 }
 
 setup_disk() {
@@ -47,7 +60,7 @@ setup_disk() {
         mv -T -- "$image.new" "$image"
     fi
     mount_unit=$(systemd-escape --path --suffix=mount "$disk")
-    cat > "/etc/systemd/system/$mount_unit" <<EOF
+    publish_unit "/etc/systemd/system/$mount_unit" <<EOF
 [Mount]
 What=$image
 Where=$disk
@@ -55,13 +68,13 @@ Type=ext4
 Options=loop,nodev,nosuid
 EOF
     install -d -m 0755 "/etc/systemd/system/user@$uid.service.d" "/etc/systemd/system/user-$uid.slice.d"
-    cat > "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" <<EOF
+    publish_unit "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" <<EOF
 [Unit]
 Requires=ai-bootstrap-firewall.service
 After=ai-bootstrap-firewall.service
 RequiresMountsFor=$disk
 EOF
-    cat > "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf" <<'EOF'
+    publish_unit "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf" <<'EOF'
 [Slice]
 CPUQuota=100%
 MemoryMax=384M
@@ -71,9 +84,9 @@ EOF
     systemctl daemon-reload
     systemctl start "$mount_unit"
     if [[ ! -e $home ]]; then
-        install -d -o "$uid" -g "$uid" -m 0700 "$home"
+        install -d -o "$uid" -g "$gid" -m 0700 "$home"
     fi
-    [[ -d $home && ! -L $home && $(stat -c '%u:%g:%a' "$home") == "$uid:$uid:700" ]] ||
+    [[ -d $home && ! -L $home && $(stat -c '%u:%g:%a' "$home") == "$uid:$gid:700" ]] ||
         die 'incompatible project home'
 }
 
@@ -96,12 +109,13 @@ base_archive() {
 
 create_project() {
     [[ $# == 0 ]] || die 'create expects one project name'
+    [[ $enabled == yes ]] || die 'enable sandbox in config.yaml and rerun the installer'
     nft list chain inet ai_bootstrap sandbox_route >/dev/null || die 'sandbox firewall is not loaded'
     exec 9>/run/lock/ai-bootstrap-sandbox.lock
     flock 9
     if ! id "$user" >/dev/null 2>&1; then
         useradd --user-group --no-create-home --home-dir "$home" --shell /usr/sbin/nologin \
-            -K UID_MIN=61000 -K UID_MAX=61999 -K GID_MIN=61000 -K GID_MAX=61999 "$user"
+            -K "UID_MIN=$min_uid" -K "UID_MAX=$max_uid" "$user"
     fi
     project_account
     setup_disk

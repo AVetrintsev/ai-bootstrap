@@ -37,7 +37,7 @@ table inet ai_bootstrap {
     }
 
     chain mihomo_dial {
-        # Check the real destination after DNS, fake-IP reversal or sniffing.
+        # Check the destination of sockets opened directly by mihomo.
         fib daddr type { local, broadcast, multicast } drop
         ip daddr @sandbox_private drop
         ip daddr 198.18.0.0/15 drop
@@ -51,8 +51,8 @@ table inet ai_bootstrap {
 
     chain route_output {
         type route hook output priority mangle; policy accept;
-        meta skuid 61000-61999 jump sandbox_route
-        meta skuid "ai-mihomo" meta nfproto ipv4 ct direction original jump mihomo_dial
+        meta skuid @SANDBOX_UID_RANGE@ @SANDBOX_ROUTE@
+        @SANDBOX_MIHOMO_GUARD@
         meta nfproto ipv6 return
         oifname "lo" return
         jump direct_ipv4
@@ -76,7 +76,7 @@ table inet ai_bootstrap {
     chain egress {
         # postrouting sees the interface selected after route_output sets the mark.
         type filter hook postrouting priority filter; policy drop;
-        meta skuid 61000-61999 jump sandbox_egress
+        meta skuid @SANDBOX_UID_RANGE@ jump sandbox_egress
         oifname "lo" accept
         meta nfproto ipv6 drop
         oifname "ai-mihomo" accept

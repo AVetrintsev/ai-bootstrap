@@ -5,6 +5,8 @@ set -Eeuo pipefail
 first=accept-a
 second=accept-b
 marker=/root/ai-bootstrap-acceptance
+read -r enabled min_uid max_uid < /etc/ai-bootstrap/sandbox-settings
+[[ $enabled == yes ]]
 vm_ipv4=$(ip -4 route get 1.1.1.1 | awk '{for (i=1; i<NF; i++) if ($i=="src") print $(i+1)}')
 
 deny() {
@@ -18,11 +20,55 @@ connect() {
     ai-sandbox shell "$1" timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$2" "$3"
 }
 
+check_internal_tcp() (
+    namespace=ai-sandbox-acceptance
+    host_if=aisbx-test0
+    peer_if=aisbx-test1
+    address=10.252.6.2
+    port=38006
+    element="{ $address . $port }"
+    ip netns add "$namespace"
+    cleanup() {
+        if [[ ${allowed:-} ]]; then
+            nft delete element inet ai_bootstrap sandbox_internal_tcp "$element"
+        fi
+        if [[ ${server:-} ]]; then
+            kill "$server" 2>/dev/null || true
+        fi
+        if [[ ${created_link:-} ]]; then
+            ip link delete "$host_if" 2>/dev/null || true
+        fi
+        ip netns delete "$namespace"
+    }
+    trap cleanup EXIT
+    ip link add "$host_if" type veth peer name "$peer_if" netns "$namespace"
+    created_link=yes
+    ip addr add 10.252.6.1/30 dev "$host_if"
+    ip link set "$host_if" up
+    ip -n "$namespace" addr add "$address/30" dev "$peer_if"
+    ip -n "$namespace" link set "$peer_if" up
+    ip netns exec "$namespace" python3 -m http.server "$port" --bind "$address" --directory /var/empty &
+    server=$!
+    ready=no
+    for attempt in {1..10}; do
+        if ip netns exec "$namespace" bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$address" "$port" 2>/dev/null; then
+            ready=yes
+            break
+        fi
+        sleep 1
+    done
+    [[ $ready == yes ]]
+    deny connect "$first" "$address" "$port"
+    nft add element inet ai_bootstrap sandbox_internal_tcp "$element"
+    allowed=yes
+    connect "$first" "$address" "$port"
+)
+
 check_isolation() {
     for project in "$first" "$second"; do
         [[ $(ai-sandbox shell "$project" id -u) == 0 ]]
         uid=$(id -u "aisbx-$project")
-        [[ $uid -ge 61000 && $uid -le 61999 ]]
+        [[ $uid -ge $min_uid && $uid -le $max_uid ]]
         user=aisbx-$project
         pid=$(runuser -u "$user" -- env -i PATH=/usr/bin:/bin \
             HOME="/var/lib/ai-sandboxes/$project/disk/home" XDG_RUNTIME_DIR="/run/user/$uid" \
@@ -56,6 +102,7 @@ case ${1:-} in
         ai-sandbox create "$second"
         ai-sandbox shell "$first" touch "$marker"
         check_isolation
+        check_internal_tcp
         ai-sandbox shell "$first" bash -c '
             set -eu
             if [[ -n $1 ]]; then
