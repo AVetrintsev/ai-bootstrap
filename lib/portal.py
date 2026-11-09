@@ -3,8 +3,10 @@
 import argparse
 import base64
 from contextlib import closing
+from datetime import datetime, timezone
 import hashlib
 import hmac
+from html import escape
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from io import BytesIO
@@ -13,6 +15,7 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+from threading import BoundedSemaphore
 import time
 from urllib.parse import parse_qs, quote
 
@@ -25,6 +28,8 @@ STATE = Path("/var/lib/ai-portal")
 KEY = Path("/etc/ai-bootstrap/portal.key")
 OWNER_PREFIX = "/_owner/"
 TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
+BROWSER_ACTION = re.compile(r"/browsers/([0-9a-f]{64})/(rename|revoke)")
+BROWSER_NAME_LIMIT = 80
 TOTP_DIGITS = 6
 TOTP_PERIOD = 30
 CODE = re.compile(rf"[0-9]{{{TOTP_DIGITS}}}")
@@ -32,6 +37,9 @@ HOUR = 60 * 60
 ACTIVATION_LIFETIME = 24 * HOUR
 SESSION_LIFETIME = 30 * ACTIVATION_LIFETIME
 FAILURE_LIMIT = 3
+STREAM_CHECK_INTERVAL = 1
+# Gunicorn runs four threads per worker. Reserve capacity for portal requests.
+STREAM_SLOTS = BoundedSemaphore(3)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS owner (
@@ -48,7 +56,10 @@ CREATE TABLE IF NOT EXISTS failures (
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash BLOB PRIMARY KEY,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    name TEXT NOT NULL DEFAULT 'Браузер',
+    registered_at INTEGER NOT NULL,
+    last_active_at INTEGER NOT NULL
 );
 """
 
@@ -77,9 +88,20 @@ class OwnerAccess:
         return db
 
     def initialize(self):
-        with closing(self.connect()) as db:
+        with closing(self.connect()) as db, db:
             db.execute("PRAGMA journal_mode = WAL")
             db.executescript(SCHEMA)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(sessions)")}
+            if "registered_at" not in columns:
+                db.execute("ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT 'Браузер'")
+                db.execute("ALTER TABLE sessions ADD COLUMN registered_at INTEGER NOT NULL DEFAULT 0")
+                db.execute("ALTER TABLE sessions ADD COLUMN last_active_at INTEGER NOT NULL DEFAULT 0")
+                # Before sliding expiration, expiry was always registration plus 30 days.
+                db.execute(
+                    "UPDATE sessions SET registered_at = expires_at - ?, last_active_at = expires_at - ?",
+                    (SESSION_LIFETIME, SESSION_LIFETIME),
+                )
 
     def provision(self):
         with closing(self.connect()) as db, db:
@@ -90,18 +112,28 @@ class OwnerAccess:
                 return None
             if owner and owner["activation_expires"] > now:
                 return OWNER_PREFIX + self.cipher.decrypt(owner["activation"]).decode("ascii")
-            activation = secrets.token_urlsafe(32)
-            db.execute(
-                """INSERT OR REPLACE INTO owner (id, secret, activation, activation_expires, registration)
-                   VALUES (1, ?, ?, ?, ?)""",
-                (
-                    self.cipher.encrypt(secrets.token_bytes(20)),
-                    self.cipher.encrypt(activation.encode("ascii")),
-                    now + ACTIVATION_LIFETIME,
-                    self.cipher.encrypt(secrets.token_urlsafe(32).encode("ascii")),
-                ),
-            )
-            return OWNER_PREFIX + activation
+            return self.issue_activation(db, now)
+
+    def issue_activation(self, db, now):
+        activation = secrets.token_urlsafe(32)
+        db.execute(
+            """INSERT OR REPLACE INTO owner (id, secret, activation, activation_expires, registration)
+               VALUES (1, ?, ?, ?, ?)""",
+            (
+                self.cipher.encrypt(secrets.token_bytes(20)),
+                self.cipher.encrypt(activation.encode("ascii")),
+                now + ACTIVATION_LIFETIME,
+                self.cipher.encrypt(secrets.token_urlsafe(32).encode("ascii")),
+            ),
+        )
+        return OWNER_PREFIX + activation
+
+    def recover(self):
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM sessions")
+            db.execute("DELETE FROM failures")
+            return self.issue_activation(db, int(self.clock()))
 
     def registration_kind(self, owner, token, now):
         if owner is None:
@@ -124,12 +156,14 @@ class OwnerAccess:
                 return kind, self.cipher.decrypt(owner["secret"])
             return kind, None
 
-    def registration_path(self):
-        with closing(self.connect()) as db:
-            owner = db.execute("SELECT registration FROM owner WHERE id = 1 AND activation IS NULL").fetchone()
-            if owner:
-                return OWNER_PREFIX + self.cipher.decrypt(owner["registration"]).decode("ascii")
-            return None
+    def rotate_registration(self):
+        with closing(self.connect()) as db, db:
+            token = secrets.token_urlsafe(32)
+            updated = db.execute(
+                "UPDATE owner SET registration = ? WHERE id = 1 AND activation IS NULL",
+                (self.cipher.encrypt(token.encode("ascii")),),
+            )
+            return OWNER_PREFIX + token if updated.rowcount else None
 
     def register(self, token, code, ip):
         # Serialize lookup, rate limits, TOTP consumption and session issuance across workers.
@@ -164,21 +198,75 @@ class OwnerAccess:
                 )
                 db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
                 db.execute(
-                    "INSERT INTO sessions VALUES (?, ?)", (digest(session), now + SESSION_LIFETIME)
+                    """INSERT INTO sessions (token_hash, expires_at, registered_at, last_active_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (digest(session), now + SESSION_LIFETIME, now, now),
                 )
                 return HTTPStatus.SEE_OTHER, session
 
             db.execute("INSERT INTO failures VALUES (?, ?)", (now, ip))
             return HTTPStatus.BAD_REQUEST, None
 
+    @staticmethod
+    def active_session(db, token_hash, now):
+        return db.execute(
+            "SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?",
+            (token_hash, now),
+        ).fetchone() is not None
+
     def has_session(self, token):
         if not TOKEN.fullmatch(token):
             return False
         with closing(self.connect()) as db:
-            return db.execute(
-                "SELECT 1 FROM sessions WHERE token_hash = ? AND expires_at > ?",
-                (digest(token), int(self.clock())),
-            ).fetchone() is not None
+            return self.active_session(db, digest(token), int(self.clock()))
+
+    @staticmethod
+    def renew_session(db, token_hash, now):
+        db.execute(
+            """UPDATE sessions SET last_active_at = MAX(last_active_at, ?),
+               expires_at = MAX(expires_at, ?) WHERE token_hash = ?""",
+            (now, now + SESSION_LIFETIME, token_hash),
+        )
+
+    def dashboard(self, token_hash, *, renew):
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE" if renew else "BEGIN")
+            now = int(self.clock())
+            if not self.active_session(db, token_hash, now):
+                return None
+            if renew:
+                self.renew_session(db, token_hash, now)
+            owner = db.execute("SELECT registration FROM owner WHERE id = 1").fetchone()
+            link = OWNER_PREFIX + self.cipher.decrypt(owner["registration"]).decode("ascii")
+            browsers = db.execute(
+                """SELECT * FROM sessions WHERE expires_at > ?
+                   ORDER BY registered_at, token_hash""",
+                (now,),
+            ).fetchall()
+            return link, browsers
+
+    def change_browser(self, token_hash, browser_hash, action, name):
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            now = int(self.clock())
+            if not self.active_session(db, token_hash, now):
+                return False, False
+            if action == "revoke":
+                changed = db.execute(
+                    "DELETE FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                    (browser_hash, now),
+                )
+            else:
+                changed = db.execute(
+                    "UPDATE sessions SET name = ? WHERE token_hash = ? AND expires_at > ?",
+                    (name, browser_hash, now),
+                )
+            if not changed.rowcount:
+                return False, False
+            current_revoked = action == "revoke" and token_hash == browser_hash
+            if not current_revoked:
+                self.renew_session(db, token_hash, now)
+            return True, not current_revoked
 
 
 def session_cookie(header):
@@ -189,18 +277,31 @@ def session_cookie(header):
     return cookie.value if cookie else ""
 
 
-def submitted_code(environ):
+def submitted_form(environ, *, max_fields, max_length):
     if environ.get("CONTENT_TYPE", "").split(";", 1)[0] != "application/x-www-form-urlencoded":
-        return ""
+        return {}
     try:
         length = int(environ.get("CONTENT_LENGTH", "0"))
-        if not 0 < length <= 256:
-            return ""
-        form = parse_qs(environ["wsgi.input"].read(length).decode("ascii"), max_num_fields=1)
+        if not 0 < length <= max_length:
+            return {}
+        fields = parse_qs(environ["wsgi.input"].read(length).decode("ascii"),
+                          max_num_fields=max_fields, errors="strict")
     except (ValueError, UnicodeError):
-        return ""
-    values = form.get("code", [])
-    return values[0] if len(values) == 1 and CODE.fullmatch(values[0]) else ""
+        return {}
+    return {name: values[0] for name, values in fields.items() if len(values) == 1}
+
+
+def foreground_navigation(environ):
+    return (
+        environ.get("HTTP_SEC_FETCH_MODE") == "navigate"
+        and environ.get("HTTP_SEC_FETCH_DEST") == "document"
+        and not environ.get("HTTP_SEC_PURPOSE")
+        and not environ.get("HTTP_PURPOSE")
+    )
+
+
+def csrf_token(session):
+    return hmac.digest(session.encode("ascii"), b"browser management", "sha256").hex()
 
 
 def respond(start_response, status, body="", content_type="text/plain; charset=utf-8", headers=()):
@@ -243,6 +344,25 @@ def enrollment_qr(secret):
     )
 
 
+def browser_row(browser, current_hash, csrf):
+    browser_hash = browser["token_hash"]
+    path = f"/browsers/{browser_hash.hex()}"
+    name = escape(browser["name"])
+    current = " (текущий)" if browser_hash == current_hash else ""
+    dates = [
+        datetime.fromtimestamp(browser[field], timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        for field in ("registered_at", "last_active_at", "expires_at")
+    ]
+    hidden = f'<input type="hidden" name="csrf" value="{csrf}">'
+    return f"""<tr><th scope="row">{name}{current}</th>
+<td>{dates[0]}</td><td>{dates[1]}</td><td>{dates[2]}</td>
+<td><form method="post" action="{path}/rename">{hidden}
+<label>Новое имя <input name="name" value="{name}" maxlength="{BROWSER_NAME_LIMIT}" required></label>
+<button>Переименовать</button></form>
+<form method="post" action="{path}/revoke">{hidden}
+<button>Отозвать сессию</button></form></td></tr>"""
+
+
 class Portal:
     def __init__(self, state, key, *, clock=time.time, secure=False):
         self.owner = OwnerAccess(state, key, clock)
@@ -250,43 +370,103 @@ class Portal:
 
     def __call__(self, environ, start_response):
         path = environ["PATH_INFO"]
+        method = environ["REQUEST_METHOD"]
+        session = session_cookie(environ.get("HTTP_COOKIE", ""))
         if path == "/_session":
-            token = session_cookie(environ.get("HTTP_COOKIE", ""))
-            status = HTTPStatus.NO_CONTENT if self.owner.has_session(token) else HTTPStatus.FORBIDDEN
+            status = HTTPStatus.NO_CONTENT if self.owner.has_session(session) else HTTPStatus.FORBIDDEN
             return respond(start_response, status)
 
         if path.startswith(OWNER_PREFIX):
             token = path.removeprefix(OWNER_PREFIX)
             if TOKEN.fullmatch(token):
                 return self.registration(environ, start_response, token.encode("ascii"))
-        elif environ["REQUEST_METHOD"] == "GET":
-            if path == "/":
-                link = self.owner.registration_path()
-                if link:
-                    page = html_page("ai-bootstrap", f'<p><a href="{link}">Зарегистрировать браузер</a></p>')
-                    return respond(start_response, HTTPStatus.OK, page, "text/html; charset=utf-8")
-            if path == "/api/status":
-                return respond(start_response, HTTPStatus.OK, '{"status":"ok"}\n', "application/json")
-            if path == "/api/test-stream":
-                start_response("200 OK", [
-                    ("Content-Type", "text/event-stream"),
-                    ("Cache-Control", "no-store"),
-                ])
-                return [b"data: ready\n\n", b"data: done\n\n"]
+        elif TOKEN.fullmatch(session):
+            if method == "GET" and path == "/":
+                return self.dashboard(environ, start_response, session)
+            action = BROWSER_ACTION.fullmatch(path)
+            if method == "POST" and action:
+                return self.change_browser(environ, start_response, session, *action.groups())
+            if method == "GET" and self.owner.has_session(session):
+                if path == "/api/status":
+                    return respond(start_response, HTTPStatus.OK, '{"status":"ok"}\n', "application/json")
+                if path == "/api/test-stream":
+                    return self.stream(start_response, session)
 
         return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
+
+    def stream(self, start_response, session):
+        if not STREAM_SLOTS.acquire(blocking=False):
+            yield from respond(start_response, HTTPStatus.SERVICE_UNAVAILABLE, "Stream limit reached\n")
+            return
+        try:
+            if not self.owner.has_session(session):
+                yield from respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
+                return
+            start_response("200 OK", [
+                ("Content-Type", "text/event-stream"),
+                ("Cache-Control", "no-store"),
+            ])
+            yield b"data: ready\n\n"
+            while True:
+                time.sleep(STREAM_CHECK_INTERVAL)
+                # Nginx checks only the initial request. Poll SQLite so revocation
+                # from another worker or the admin command closes this connection.
+                if not self.owner.has_session(session):
+                    return
+                yield b": keepalive\n\n"
+        finally:
+            STREAM_SLOTS.release()
+
+    def cookie(self, session, lifetime=SESSION_LIFETIME):
+        value = f"ai_session={session}; Path=/; Max-Age={lifetime}; HttpOnly; SameSite=Strict"
+        return "Set-Cookie", value + ("; Secure" if self.secure else "")
+
+    def dashboard(self, environ, start_response, session):
+        renew = foreground_navigation(environ)
+        token_hash = digest(session)
+        dashboard = self.owner.dashboard(token_hash, renew=renew)
+        if dashboard is None:
+            return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
+        link, browsers = dashboard
+        csrf = csrf_token(session)
+        rows = "".join(browser_row(browser, token_hash, csrf) for browser in browsers)
+        page = html_page("ai-bootstrap", f"""
+<p><a href="{link}">Зарегистрировать браузер</a></p>
+<h2>Зарегистрированные браузеры</h2>
+<table><thead><tr><th>Имя</th><th>Регистрация</th><th>Последняя активность</th>
+<th>Срок действия</th><th>Управление</th></tr></thead><tbody>{rows}</tbody></table>""")
+        headers = (self.cookie(session),) if renew else ()
+        return respond(start_response, HTTPStatus.OK, page, "text/html; charset=utf-8", headers)
+
+    def change_browser(self, environ, start_response, session, browser_id, action):
+        if not self.owner.has_session(session):
+            return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
+        form = submitted_form(environ, max_fields=2, max_length=2048)
+        if not hmac.compare_digest(form.get("csrf", "").encode(), csrf_token(session).encode()):
+            return respond(start_response, HTTPStatus.FORBIDDEN, "Недействительная форма.\n")
+
+        name = ""
+        if action == "rename":
+            name = form.get("name", "").strip()
+            if not 0 < len(name) <= BROWSER_NAME_LIMIT or not name.isprintable():
+                return respond(start_response, HTTPStatus.BAD_REQUEST, "Укажите имя браузера.\n")
+        browser_hash = bytes.fromhex(browser_id)
+        current_hash = digest(session)
+        changed, renewed = self.owner.change_browser(current_hash, browser_hash, action, name)
+        if not changed:
+            return respond(start_response, HTTPStatus.NOT_FOUND, "Not found\n")
+        cookie = self.cookie(session) if renewed else self.cookie("", 0)
+        return respond(start_response, HTTPStatus.SEE_OTHER, headers=(("Location", "/"), cookie))
 
     def registration(self, environ, start_response, token):
         method = environ["REQUEST_METHOD"]
         if method == "POST":
+            code = submitted_form(environ, max_fields=1, max_length=256).get("code", "")
             status, session = self.owner.register(
-                token, submitted_code(environ), environ["HTTP_X_PORTAL_CLIENT_IP"]
+                token, code if CODE.fullmatch(code) else "", environ["HTTP_X_PORTAL_CLIENT_IP"]
             )
             if session:
-                cookie = f"ai_session={session}; Path=/; Max-Age={SESSION_LIFETIME}; HttpOnly; SameSite=Strict"
-                if self.secure:
-                    cookie += "; Secure"
-                return respond(start_response, status, headers=(("Location", "/"), ("Set-Cookie", cookie)))
+                return respond(start_response, status, headers=(("Location", "/"), self.cookie(session)))
             messages = {
                 HTTPStatus.NOT_FOUND: "Страница недоступна.\n",
                 HTTPStatus.BAD_REQUEST: "Код не принят. Вернитесь к форме и введите новый код.\n",
@@ -323,18 +503,29 @@ def application(environ, start_response):
     return portal(environ, start_response)
 
 
-def main():
+def main(argv=None):
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("activation").add_argument("base_url")
-    args = parser.parse_args()
+    commands.add_parser("recover").add_argument("base_url")
+    commands.add_parser("rotate-registration").add_argument("base_url")
+    args = parser.parse_args(argv)
     owner = OwnerAccess(STATE, KEY.read_bytes(), time.time)
     if args.command == "init":
         owner.initialize()
-    else:
+    elif args.command == "activation":
         print_activation_url(owner, args.base_url)
+    elif args.command == "recover":
+        owner.initialize()
+        print(args.base_url + owner.recover())
+    else:
+        owner.initialize()
+        path = owner.rotate_registration()
+        if path is None:
+            parser.exit(1, "Сначала активируйте владельца.\n")
+        print(args.base_url + path)
 
 
 if __name__ == "__main__":
