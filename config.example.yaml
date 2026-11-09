@@ -6,6 +6,10 @@ portal:
   transport: local-http
   # Для https задайте domain и expected_ipv4.
 
+sandbox:
+  internal_tcp: []
+  # Здесь можно перечислить доверенные службы во внутренних сетях, например "10.2.3.4:8443".
+
 mihomo:
   profile: |
     mode: rule

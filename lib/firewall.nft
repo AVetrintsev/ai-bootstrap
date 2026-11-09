@@ -6,6 +6,43 @@ table inet ai_bootstrap {
         elements = { @ADMIN_IPV4@ }
     }
 
+    set sandbox_internal_tcp {
+        type ipv4_addr . inet_service
+        @SANDBOX_INTERNAL_TCP@
+    }
+
+    set sandbox_private {
+        type ipv4_addr
+        flags interval
+        elements = {
+            0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+            172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16,
+            198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4, 168.63.129.16
+        }
+    }
+
+    chain sandbox_route {
+        meta nfproto ipv6 drop
+        fib daddr type { local, broadcast, multicast } drop
+        ip daddr . tcp dport @sandbox_internal_tcp accept
+        ip daddr @sandbox_private drop
+        meta mark set 0xa1b0 accept
+    }
+
+    chain sandbox_egress {
+        meta nfproto ipv6 drop
+        ip daddr . tcp dport @sandbox_internal_tcp accept
+        oifname "ai-mihomo" accept
+        drop
+    }
+
+    chain mihomo_dial {
+        # Check the real destination after DNS, fake-IP reversal or sniffing.
+        fib daddr type { local, broadcast, multicast } drop
+        ip daddr @sandbox_private drop
+        ip daddr 198.18.0.0/15 drop
+    }
+
     chain direct_ipv4 {
         ip daddr @administrators tcp sport 22 ct direction reply ct state established accept
         udp sport 68 udp dport 67 accept
@@ -14,6 +51,8 @@ table inet ai_bootstrap {
 
     chain route_output {
         type route hook output priority mangle; policy accept;
+        meta skuid 61000-61999 jump sandbox_route
+        meta skuid "ai-mihomo" meta nfproto ipv4 ct direction original jump mihomo_dial
         meta nfproto ipv6 return
         oifname "lo" return
         jump direct_ipv4
@@ -37,6 +76,7 @@ table inet ai_bootstrap {
     chain egress {
         # postrouting sees the interface selected after route_output sets the mark.
         type filter hook postrouting priority filter; policy drop;
+        meta skuid 61000-61999 jump sandbox_egress
         oifname "lo" accept
         meta nfproto ipv6 drop
         oifname "ai-mihomo" accept

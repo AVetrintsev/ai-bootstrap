@@ -64,6 +64,25 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("MATCH,REJECT", result.stderr)
         self.assertIsNone(profile)
 
+    def test_stages_only_explicit_internal_tcp_endpoints(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        result, firewall = self.stage(
+            example.replace("internal_tcp: []", "internal_tcp: ['10.2.3.4:8443']"), artifact="firewall.nft"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("elements = { 10.2.3.4 . 8443 }", firewall)
+
+    def test_rejects_public_or_metadata_addresses_in_the_internal_allowlist(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        for endpoint in ("1.1.1.1:443", "169.254.169.254:80", "10.0.0.1:65536"):
+            with self.subTest(endpoint=endpoint):
+                result, firewall = self.stage(
+                    example.replace("internal_tcp: []", f"internal_tcp: ['{endpoint}']"), artifact="firewall.nft"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("sandbox.internal_tcp", result.stderr)
+                self.assertIsNone(firewall)
+
 
 if __name__ == "__main__":
     unittest.main()
