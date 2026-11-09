@@ -46,12 +46,13 @@ check_internal_tcp() (
     ip addr add 10.252.6.1/30 dev "$host_if"
     ip link set "$host_if" up
     ip -n "$namespace" addr add "$address/30" dev "$peer_if"
+    ip -n "$namespace" link set lo up
     ip -n "$namespace" link set "$peer_if" up
     ip netns exec "$namespace" python3 -m http.server "$port" --bind "$address" --directory /var/empty &
     server=$!
     ready=no
     for attempt in {1..10}; do
-        if ip netns exec "$namespace" bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$address" "$port" 2>/dev/null; then
+        if ip netns exec "$namespace" timeout 1 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$address" "$port" 2>/dev/null; then
             ready=yes
             break
         fi
