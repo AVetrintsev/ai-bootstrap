@@ -1,0 +1,11 @@
+[Unit]
+Description=AI Bootstrap GitHub portal socket
+
+[Socket]
+ListenStream=/run/ai-bootstrap-github.sock
+SocketGroup=ai-portal
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

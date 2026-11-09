@@ -20,6 +20,8 @@ project_dir=/var/lib/ai-sandboxes/$project
 disk=$project_dir/disk
 home=$disk/home
 unit=ai-bootstrap-sandbox.service
+github_socket=ai-bootstrap-git@$project.socket
+github_mounts=()
 read -r enabled min_uid max_uid < /etc/ai-bootstrap/sandbox-settings
 
 project_account() {
@@ -48,7 +50,7 @@ publish_unit() {
 }
 
 setup_disk() {
-    local image=$project_dir/disk.ext4 mount_unit
+    local image=$project_dir/disk.ext4 mount_unit socket_requires=
     install -d -m 0711 "$project_dir"
     if [[ ! -d $disk ]]; then
         install -d -m 0700 "$disk"
@@ -68,11 +70,15 @@ Type=ext4
 Options=loop,nodev,nosuid
 EOF
     install -d -m 0755 "/etc/systemd/system/user@$uid.service.d" "/etc/systemd/system/user-$uid.slice.d"
+    if [[ ${#github_mounts[@]} != 0 ]]; then
+        socket_requires=$'Requires='"$github_socket"$'\nAfter='"$github_socket"
+    fi
     publish_unit "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" <<EOF
 [Unit]
 Requires=ai-bootstrap-firewall.service
 After=ai-bootstrap-firewall.service
 RequiresMountsFor=$disk
+$socket_requires
 EOF
     publish_unit "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf" <<'EOF'
 [Slice]
@@ -119,6 +125,9 @@ create_project() {
     fi
     project_account
     setup_disk
+    if [[ ${#github_mounts[@]} != 0 ]]; then
+        systemctl start "$github_socket"
+    fi
     systemctl start "user@$uid.service"
     if ! as_project podman container exists project; then
         base_archive
@@ -131,7 +140,7 @@ create_project() {
             --network slirp4netns:allow_host_loopback=false,enable_ipv6=false --dns 1.1.1.1 \
             --no-hosts --http-proxy=false --image-volume=ignore --log-driver=none \
             --security-opt=no-new-privileges --cap-drop=NET_RAW --cap-drop=MKNOD \
-            --stop-timeout=5 --pull=never "$image" /usr/bin/sleep infinity >/dev/null
+            "${github_mounts[@]}" --stop-timeout=5 --pull=never "$image" /usr/bin/sleep infinity >/dev/null
     fi
     as_project systemctl --user daemon-reload
     as_project systemctl --user enable --now "$unit"
@@ -145,8 +154,70 @@ create_project() {
     die 'container did not start; check the project user service journal'
 }
 
+github_create() {
+    [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 1 &&
+       $1 =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9_.-]{1,100}$ &&
+       ${1#*/} != . && ${1#*/} != .. ]] || die 'invalid GitHub project'
+    local repository=$1
+    github_mounts=(
+        --volume "/run/ai-bootstrap-git/$project:/run/ai-bootstrap-git:ro"
+        --volume /usr/local/libexec/ai-bootstrap/github-sandbox:/usr/local/lib/ai-bootstrap:ro
+    )
+    create_project
+    as_project podman exec --env DEBIAN_FRONTEND=noninteractive project /bin/bash -eu -c '
+        url=https://github.com/$1.git
+        dpkg --configure -a
+        if ! command -v git >/dev/null || ! command -v python3 >/dev/null || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
+            apt-get -q update
+            apt-get -qy --no-install-recommends install git ca-certificates python3-minimal
+        fi
+        git config --system credential.https://github.com.useHttpPath true
+        git config --system credential.https://github.com.helper /usr/local/lib/ai-bootstrap/github-credential
+        install -d /workspace
+        cd /workspace
+        if [[ -d repo/.git ]]; then
+            [[ $(git -C repo config --local --get remote.origin.url) == "$url" ]]
+            exit
+        fi
+        if [[ -e repo || -L repo ]]; then
+            echo "The project checkout path is occupied" >&2
+            exit 1
+        fi
+        rm -rf -- .ai-bootstrap-clone
+        GIT_TERMINAL_PROMPT=0 git clone -- "$url" .ai-bootstrap-clone
+        mv -T -- .ai-bootstrap-clone repo
+    ' _ "$repository"
+}
+
+github_delete() {
+    [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 ]] || die 'invalid GitHub project'
+    local mount_unit
+    exec 9>/run/lock/ai-bootstrap-sandbox.lock
+    flock 9
+    id "$user" >/dev/null 2>&1 || return 0
+    project_account
+    loginctl disable-linger "$user"
+    systemctl stop "user@$uid.service" "user-$uid.slice" "$github_socket"
+    mount_unit=$(systemd-escape --path --suffix=mount "$disk")
+    if [[ -e /etc/systemd/system/$mount_unit ]]; then
+        systemctl stop "$mount_unit"
+    fi
+    ! mountpoint -q -- "$disk" || die 'project disk is still mounted'
+    rm -f -- "$project_dir/disk.ext4" "$project_dir/disk.ext4.new" \
+        "/etc/systemd/system/$mount_unit" \
+        "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" \
+        "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf"
+    systemctl daemon-reload
+    # Keep the UID reserved for this project. A later add recreates its disk.
+}
+
 case $action in
-    create) create_project "$@" ;;
+    create)
+        [[ $project != gh-* ]] || die 'gh- is reserved for GitHub projects'
+        create_project "$@"
+        ;;
+    github-create) github_create "$@" ;;
+    github-delete) github_delete "$@" ;;
     shell)
         project_account
         args=(--interactive)

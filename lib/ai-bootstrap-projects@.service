@@ -1,0 +1,10 @@
+[Unit]
+Description=Provision an AI Bootstrap project sandbox
+
+[Service]
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/github_projects.py provision
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=15min
+UMask=0077

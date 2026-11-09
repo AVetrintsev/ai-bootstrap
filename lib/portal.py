@@ -6,6 +6,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import json
 from html import escape
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
@@ -14,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import sqlite3
 from threading import BoundedSemaphore
 import time
@@ -304,6 +306,15 @@ def csrf_token(session):
     return hmac.digest(session.encode("ascii"), b"browser management", "sha256").hex()
 
 
+def github_request(action, **fields):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(35)
+        connection.connect("/run/ai-bootstrap-github.sock")
+        connection.sendall(json.dumps({"action": action, **fields}).encode() + b"\n")
+        with connection.makefile("rb") as reply:
+            return json.loads(reply.readline(2 * 1024 * 1024))
+
+
 def respond(start_response, status, body="", content_type="text/plain; charset=utf-8", headers=()):
     start_response(
         f"{status.value} {status.phrase}",
@@ -386,6 +397,9 @@ class Portal:
             action = BROWSER_ACTION.fullmatch(path)
             if method == "POST" and action:
                 return self.change_browser(environ, start_response, session, *action.groups())
+            if path in ("/projects", "/projects/add", "/projects/delete", "/github/connect"):
+                if self.owner.has_session(session):
+                    return self.projects(environ, start_response, session, path, method)
             if method == "GET" and self.owner.has_session(session):
                 if path == "/api/status":
                     return respond(start_response, HTTPStatus.OK, '{"status":"ok"}\n', "application/json")
@@ -431,12 +445,91 @@ class Portal:
         csrf = csrf_token(session)
         rows = "".join(browser_row(browser, token_hash, csrf) for browser in browsers)
         page = html_page("ai-bootstrap", f"""
+<p><a href="/projects">Проекты</a></p>
 <p><a href="{link}">Зарегистрировать браузер</a></p>
 <h2>Зарегистрированные браузеры</h2>
 <table><thead><tr><th>Имя</th><th>Регистрация</th><th>Последняя активность</th>
 <th>Срок действия</th><th>Управление</th></tr></thead><tbody>{rows}</tbody></table>""")
         headers = (self.cookie(session),) if renew else ()
         return respond(start_response, HTTPStatus.OK, page, "text/html; charset=utf-8", headers)
+
+    def projects(self, environ, start_response, session, path, method):
+        actions = {
+            ("GET", "/projects"): "projects",
+            ("GET", "/github/connect"): "app",
+            ("POST", "/github/connect"): "connect",
+            ("GET", "/projects/add"): "repositories",
+            ("POST", "/projects/add"): "add",
+            ("POST", "/projects/delete"): "delete",
+        }
+        action = actions.get((method, path))
+        if action is None:
+            return respond(start_response, HTTPStatus.NOT_FOUND)
+        csrf = csrf_token(session)
+        hidden = f'<input type="hidden" name="csrf" value="{csrf}">'
+        fields = {}
+        if method == "POST":
+            form = submitted_form(environ, max_fields=3, max_length=1024)
+            if not hmac.compare_digest(form.get("csrf", "").encode(), csrf.encode()):
+                return respond(start_response, HTTPStatus.FORBIDDEN, "Недействительная форма.\n")
+            if action in ("add", "delete"):
+                repository = form.get("repository", "")
+                if not re.fullmatch(r"[1-9][0-9]{0,18}", repository):
+                    return respond(start_response, HTTPStatus.BAD_REQUEST, "Выберите репозиторий.\n")
+                if action == "delete" and form.get("confirm") != "yes":
+                    return respond(start_response, HTTPStatus.BAD_REQUEST, "Подтвердите удаление.\n")
+                fields["repository"] = int(repository)
+        back = '<p><a href="/projects">К проектам</a></p>'
+        try:
+            result = github_request(action, **fields)
+        except (OSError, ValueError):
+            result = {"error": "Служба проектов недоступна. Проверьте настройку платформы."}
+        if "error" in result:
+            return respond(start_response, HTTPStatus.SERVICE_UNAVAILABLE,
+                           html_page("Проекты", f'<p>{escape(result["error"])}</p>{back}'),
+                           "text/html; charset=utf-8")
+        if method == "POST":
+            return respond(start_response, HTTPStatus.SEE_OTHER, headers=(("Location", "/projects"),))
+        if action == "app":
+            url = escape(result["install_url"])
+            content = f"""<p><a href="{url}" target="_blank" rel="noopener noreferrer">
+Установить GitHub App</a></p>
+<p>Разрешите приложению доступ к выбранным репозиториям, затем подтвердите подключение здесь.</p>
+<form method="post">{hidden}<button>Подтвердить подключение</button></form>{back}"""
+            title = "Подключить GitHub"
+        elif action == "repositories":
+            options = "".join(f'<option value="{repo["id"]}">{escape(repo["name"])}</option>'
+                              for repo in result["repositories"])
+            content = f"""<form method="post">{hidden}
+<label>Приватный репозиторий <select name="repository" required>{options}</select></label>
+<button>Добавить проект</button></form>{back}""" if options else f"<p>Нет доступных приватных репозиториев.</p>{back}"
+            title = "Добавить проект"
+        else:
+            title = "Проекты"
+            link = ('<a href="/projects/add">Добавить проект</a>' if result["connected"]
+                    else '<a href="/github/connect">Подключить GitHub</a>')
+            rows = "".join(self.project_row(project, hidden) for project in result["projects"])
+            content = f'<p><a href="/">Главная</a></p><p>{link}</p><ul>{rows}</ul>'
+        return respond(start_response, HTTPStatus.OK, html_page(title, content), "text/html; charset=utf-8")
+
+    @staticmethod
+    def project_row(project, hidden):
+        states = {
+            "creating": "Подготовка песочницы",
+            "ready": "Готов",
+            "failed": "Подготовка не завершена",
+            "deleting": "Удаление",
+            "delete_failed": "Удаление не завершено",
+        }
+        status = states[project["state"]]
+        inputs = hidden + f'<input type="hidden" name="repository" value="{project["id"]}">'
+        retry = (f'<form method="post" action="/projects/add">{inputs}<button>Повторить добавление</button></form>'
+                 if project["state"] == "failed" else "")
+        delete = (f"""<form method="post" action="/projects/delete">{inputs}
+<label><input type="checkbox" name="confirm" value="yes" required> Удалить рабочую копию и песочницу</label>
+<button>Удалить проект</button></form>""" if project["state"] not in ("creating", "deleting") else "")
+        return (f'<li><strong>{escape(project["name"])}</strong> · {status} '
+                f'<code>{escape(project["sandbox"])}</code>{retry}{delete}</li>')
 
     def change_browser(self, environ, start_response, session, browser_id, action):
         if not self.owner.has_session(session):

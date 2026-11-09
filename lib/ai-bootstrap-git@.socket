@@ -1,0 +1,11 @@
+[Unit]
+Description=Git credential socket for AI Bootstrap project %i
+
+[Socket]
+ListenStream=/run/ai-bootstrap-git/%i/credential.sock
+SocketGroup=aisbx-%i
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=4
+RemoveOnStop=yes

@@ -177,7 +177,7 @@ PubkeyAuthentication yes
 AuthenticationMethods publickey
 PasswordAuthentication no
 KbdInteractiveAuthentication no
-DenyUsers ai-mihomo ai-portal aisbx-*
+DenyUsers ai-mihomo ai-portal ai-github aisbx-*
 # END AI BOOTSTRAP SSH
 EOF
         sed '/^# BEGIN AI BOOTSTRAP SSH$/,/^# END AI BOOTSTRAP SSH$/d' "$work/ssh-original"
@@ -265,9 +265,26 @@ portal_packages() {
     ensure_packages gunicorn python3-cryptography python3-qrcode
 }
 
+configure_github_projects() {
+    service_account ai-github /var/lib/ai-github
+    install -d -m 0755 "$libexec/github-sandbox"
+    publish "$release/lib/github_projects.py" "$libexec/github_projects.py" 644
+    publish "$release/lib/github-credential" "$libexec/github-sandbox/github-credential" 755
+    local unit
+    for unit in ai-bootstrap-github.socket ai-bootstrap-github.service \
+        ai-bootstrap-projects.socket ai-bootstrap-projects@.service \
+        ai-bootstrap-git@.socket ai-bootstrap-git@.service; do
+        publish "$release/lib/$unit" "/etc/systemd/system/$unit" 644
+    done
+    quiet 'could not load the GitHub project units' systemctl daemon-reload
+    quiet 'could not enable the GitHub project socket' systemctl enable --now ai-bootstrap-github.socket
+    quiet 'could not reload the GitHub project service' systemctl try-restart ai-bootstrap-github.service
+}
+
 configure_portal() {
     service_account ai-portal "$portal_state"
     install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
+    configure_github_projects
     if [[ ! -e $etc/portal.key ]]; then
         [[ ! -e $portal_state/portal.sqlite3 ]] || fail 'restore the portal encryption key'
         head -c 32 /dev/urandom > "$work/portal.key"
