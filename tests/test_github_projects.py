@@ -25,6 +25,7 @@ class GitHubProjectsTest(unittest.TestCase):
         ))
         (self.state / "github-app-id").write_text("31\n", encoding="ascii")
         self.tokens = []
+        self.repository_selection = "selected"
         fake_api = patch("github_projects.request", side_effect=self.github)
         fake_api.start()
         self.addCleanup(fake_api.stop)
@@ -33,7 +34,8 @@ class GitHubProjectsTest(unittest.TestCase):
         if method == "GET" and path == "/app":
             return {"id": 31, "slug": "bootstrap-test", "owner": {"id": 6, "login": "owner"}}
         if method == "GET" and path == "/app/installations?per_page=2":
-            return [{"id": 52, "suspended_at": None, "account": {"id": 6}, "repository_selection": "selected"}]
+            return [{"id": 52, "suspended_at": None, "account": {"id": 6},
+                     "repository_selection": self.repository_selection}]
         if method == "GET" and path == "/app/installations/52":
             return {"permissions": {"contents": "write", "issues": "write"}}
         if method == "POST" and path == "/app/installations/52/access_tokens":
@@ -66,7 +68,8 @@ class GitHubProjectsTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(snapshot, expected)
 
-    def test_two_projects_from_one_installation_receive_only_their_own_fresh_credentials(self):
+    def test_all_repositories_installation_still_issues_credentials_for_one_project(self):
+        self.repository_selection = "all"
         projects = self.open_portal(lambda *_: None)
         self.assertEqual(self.app().setup_page(), {
             "install_url": "https://github.com/apps/bootstrap-test/installations/new", "account": "owner",

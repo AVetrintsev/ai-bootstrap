@@ -496,7 +496,7 @@ class Portal:
             content = f"""<p>Аккаунт GitHub <strong>{account}</strong></p>
 <p><a href="{url}" target="_blank" rel="noopener noreferrer">
 Установить GitHub App</a></p>
-<p>Разрешите приложению доступ к выбранным репозиториям, затем подтвердите подключение здесь.</p>
+<p>Разрешите приложению доступ ко всем или выбранным репозиториям, затем подтвердите подключение здесь.</p>
 <form method="post">{hidden}<button>Подтвердить подключение</button></form>{back}"""
             title = "Подключить GitHub"
         elif action == "repositories":

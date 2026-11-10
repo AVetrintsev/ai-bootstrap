@@ -101,8 +101,8 @@ class GitHubApp:
         if len(installations) != 1 or installations[0]["account"]["id"] != owner:
             raise ProjectError("Установите выделенное GitHub App в аккаунте владельца приложения.")
         installation = installations[0]
-        if installation["suspended_at"] is not None or installation["repository_selection"] != "selected":
-            raise ProjectError("Включите установку GitHub App для выбранных репозиториев.")
+        if installation["suspended_at"] is not None or installation["repository_selection"] not in ("all", "selected"):
+            raise ProjectError("Включите установку GitHub App и разрешите доступ к репозиториям.")
         return installation["id"]
 
     def token(self, installation, repository=None):
