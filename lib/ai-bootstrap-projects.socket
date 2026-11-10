@@ -1,0 +1,10 @@
+[Unit]
+Description=AI Bootstrap sandbox provisioning socket
+
+[Socket]
+ListenStream=/run/ai-bootstrap-projects.sock
+SocketGroup=ai-github
+SocketMode=0660
+Accept=yes
+MaxConnections=2
+RemoveOnStop=yes

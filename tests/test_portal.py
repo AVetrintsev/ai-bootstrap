@@ -106,6 +106,29 @@ class PortalTest(unittest.TestCase):
         self.assertNotEqual(link, self.activation())
         self.assertEqual(self.request(urlsplit(link).path)[0], 404)
 
+    def test_projects_require_owner_and_csrf_and_show_only_the_available_repositories(self):
+        cookie, _, _ = self.enroll()
+
+        def github(action, **fields):
+            if action == "repositories":
+                return {"repositories": [{"id": 7, "name": "owner/private"}]}
+            if action == "add" and fields == {"repository": 7}:
+                return {}
+            raise AssertionError((action, fields))
+
+        with patch.object(portal, "github_request", side_effect=github):
+            self.assertEqual(self.request("/projects/add")[0], 404)
+            status, _, page = self.request("/projects/add", cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertIn(b"owner/private", page)
+            csrf = re.search(rb'name="csrf" value="([^"]+)"', page).group(1).decode()
+            self.assertEqual(self.request("/projects/add", cookie=cookie, form={"repository": "7"})[0], 403)
+            status, headers, _ = self.request(
+                "/projects/add", cookie=cookie, form={"csrf": csrf, "repository": "7"}
+            )
+            self.assertEqual(status, 303)
+            self.assertEqual(headers["Location"], "/projects")
+
     def test_secure_transport_marks_cookie_secure(self):
         self.portal = self.new_portal(secure=True)
         self.assertTrue(self.activation("https://portal.example").startswith("https://portal.example/"))

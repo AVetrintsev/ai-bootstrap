@@ -1,0 +1,15 @@
+[Unit]
+Description=Issue a GitHub credential for an AI Bootstrap project
+
+[Service]
+User=ai-github
+Group=ai-github
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/github_projects.py credential
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+RuntimeMaxSec=20s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

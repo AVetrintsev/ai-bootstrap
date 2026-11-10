@@ -1,0 +1,17 @@
+[Unit]
+Description=AI Bootstrap GitHub projects
+After=ai-bootstrap-firewall.service ai-bootstrap-mihomo.service ai-bootstrap-projects.socket
+Requires=ai-bootstrap-firewall.service ai-bootstrap-projects.socket
+
+[Service]
+User=ai-github
+Group=ai-github
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/github_projects.py portal
+StateDirectory=ai-github
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Restart=on-failure
