@@ -7,23 +7,27 @@ if [[ $# != 4 ]]; then
 fi
 
 check_project() {
-    ai-sandbox shell "$1" /usr/bin/python3 - "$2" "$3" <<'PYTHON'
+    python3 - "$1" "$2" "$3" <<'PYTHON'
 from http.client import HTTPSConnection
-import os
 import subprocess
 import sys
 
-own, other = sys.argv[1:]
-os.chdir("/workspace/repo")
-env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+sandbox, own, other = sys.argv[1:]
+
+def git(*args, **kwargs):
+    return subprocess.check_output([
+        "ai-sandbox", "shell", sandbox, "/usr/bin/env", "GIT_TERMINAL_PROMPT=0",
+        "git", "-C", "/workspace/repo", *args,
+    ], text=True, **kwargs)
+
 expected_url = f"https://github.com/{own}.git"
-origin = subprocess.check_output(["git", "remote", "get-url", "origin"], text=True).strip()
+origin = git("remote", "get-url", "origin").strip()
 if origin != expected_url:
     sys.exit("Unexpected origin in the project checkout")
-subprocess.run(["git", "ls-remote", "origin"], env=env, stdout=subprocess.DEVNULL, check=True)
-credentials = subprocess.check_output(
-    ["git", "credential", "fill"],
-    input=f"protocol=https\nhost=github.com\npath={own}.git\n\n", env=env, text=True,
+git("ls-remote", "origin", "HEAD")
+credentials = git(
+    "credential", "fill",
+    input=f"protocol=https\nhost=github.com\npath={own}.git\n\n",
 )
 token = next(line.removeprefix("password=") for line in credentials.splitlines() if line.startswith("password="))
 
