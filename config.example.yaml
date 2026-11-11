@@ -19,15 +19,15 @@ sandbox:
 #       base_url: https://YOUR-WORKSPACE.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
 #       key_file: /etc/ai-bootstrap/model-keys/modelstudio.key
 #   models:
-#     qwen3-coder-flash: {provider: modelstudio, model: qwen3-coder-flash}
+#     qwen3.8-flash: {provider: modelstudio, model: qwen3.8-flash}
 #   defaults:
-#     models: [qwen3-coder-flash]
+#     models: [qwen3.8-flash]
 #     requests_per_day: 100
 #     max_output_tokens: 8192
 #   projects: {}
 #   # Здесь можно переопределить всю политику для конкретной песочницы.
 #   # projects:
-#   #   example: {models: [qwen3-coder-flash], requests_per_day: 20, max_output_tokens: 4096}
+#   #   example: {models: [qwen3.8-flash], requests_per_day: 20, max_output_tokens: 4096}
 
 mihomo:
   profile: |
