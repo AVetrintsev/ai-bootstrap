@@ -1,6 +1,8 @@
 """Project-scoped OpenAI-compatible model access; provider credentials stay on the host."""
 
 import argparse
+from contextlib import contextmanager
+from datetime import datetime, timezone
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,14 +28,31 @@ def configuration(path):
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+@contextmanager
 def database(state):
     state = Path(state)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     connection = sqlite3.connect(state / "gateway.sqlite3", timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("CREATE TABLE IF NOT EXISTS projects (name TEXT PRIMARY KEY, token TEXT NOT NULL, digest TEXT UNIQUE NOT NULL)")
+    connection.execute("CREATE TABLE IF NOT EXISTS usage (project TEXT NOT NULL, day TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY (project, day))")
     connection.commit()
-    return connection
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+def reserve_request(state, project, limit):
+    day = datetime.now(timezone.utc).date().isoformat()
+    with database(state) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("INSERT OR IGNORE INTO usage VALUES (?, ?, 0)", (project, day))
+        return connection.execute(
+            "UPDATE usage SET requests = requests + 1 WHERE project = ? AND day = ? AND requests < ?",
+            (project, day, limit),
+        ).rowcount == 1
 
 
 def provision(config, state, project):
@@ -121,13 +140,16 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeError):
             self.error(400, "invalid_request", "Expected a JSON request of at most 2 MiB.")
             return
-        _, settings, policy = authorized
+        project, settings, policy = authorized
         alias = body.get("model")
         if not isinstance(alias, str) or alias not in policy["models"]:
             self.error(403, "model_not_allowed", "This model is not enabled for the project.")
             return
         model = settings["models"][alias]
         provider = settings["providers"][model["provider"]]
+        if not reserve_request(self.server.state, project, policy["requests_per_day"]):
+            self.error(429, "project_quota_exceeded", "The project's daily request limit is exhausted; it resets at 00:00 UTC.")
+            return
         outgoing = dict(body)
         outgoing["model"] = model["model"]
         outgoing["max_tokens"] = policy["max_output_tokens"]
