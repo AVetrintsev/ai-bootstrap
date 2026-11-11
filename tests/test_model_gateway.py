@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -173,6 +174,31 @@ class GatewayTests(unittest.TestCase):
         self.config.write_text(json.dumps(settings))
         with self.assertRaisesRegex(ValueError, "HTTPS"):
             model_gateway.make_server(self.config, self.state, ("127.0.0.1", 0))
+
+    def test_concurrent_requests_cannot_overrun_the_project_quota(self):
+        request = {"model": "coder", "messages": []}
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(lambda _: self.request(request)[0], range(6)))
+        self.assertEqual(sorted(results), [200, 200, 429, 429, 429, 429])
+        self.assertEqual(len(Provider.requests), 2)
+
+    def test_key_rotation_takes_effect_without_changing_the_sandbox_key(self):
+        request = {"model": "coder", "messages": []}
+        self.assertEqual(self.request(request)[0], 200)
+        (self.root / "provider.key").write_text("rotated-provider-secret")
+        self.assertEqual(self.request(request)[0], 200)
+        self.assertEqual(Provider.requests[-1][1], "Bearer rotated-provider-secret")
+        self.assertEqual(model_gateway.provision(self.config, self.state, "alpha")["api_key"], self.client["api_key"])
+
+    def test_revoke_invalidates_an_old_project_key(self):
+        result = subprocess.run([
+            sys.executable, str(ROOT / "lib/model_gateway.py"), "--config", str(self.config),
+            "--state", str(self.state), "revoke", "alpha",
+        ], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.request(path="/v1/models")[0], 401)
+        replacement = model_gateway.provision(self.config, self.state, "alpha")
+        self.assertNotEqual(replacement["api_key"], self.client["api_key"])
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ die() {
 }
 
 [[ $EUID == 0 ]] || die 'run as root'
-[[ $# -ge 2 ]] || die 'usage: ai-sandbox create PROJECT | shell PROJECT [COMMAND [ARG...]]'
+[[ $# -ge 2 ]] || die 'usage: ai-sandbox create PROJECT | qwen-setup PROJECT | shell PROJECT [COMMAND [ARG...]]'
 action=$1
 project=$2
 shift 2
@@ -114,10 +114,8 @@ base_archive() {
         die 'cached base archive failed the release SHA-256 check'
 }
 
-configure_qwen() {
-    [[ -f /etc/ai-bootstrap/model-gateway.json ]] || return 0
-    local gateway_host client
-    gateway_host=$(python3 -I -c '
+gateway_address() {
+    python3 -I -c '
 import ipaddress,json,subprocess
 routes=json.loads(subprocess.check_output(["ip","-4","-j","route","show","default"]))
 for route in routes:
@@ -126,7 +124,13 @@ for route in routes:
    if address["scope"] == "global":
     print(ipaddress.IPv4Address(address["local"])); raise SystemExit
 raise SystemExit("No host IPv4 address for the model gateway")
-') || die 'could not determine the model gateway address'
+'
+}
+
+configure_qwen() {
+    [[ -f /etc/ai-bootstrap/model-gateway.json ]] || return 0
+    local gateway_host client
+    gateway_host=$(gateway_address) || die 'could not determine the model gateway address'
     install -d -m 0755 "/etc/systemd/system/user-$uid.slice.d"
     publish_unit "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf" <<'EOF'
 [Slice]
@@ -281,9 +285,17 @@ case $action in
         ;;
     github-create) github_create "$@" ;;
     github-delete) github_delete "$@" ;;
-    shell)
+    qwen-setup)
+        [[ $# == 0 ]] || die 'qwen-setup expects one project name'
         project_account
         configure_qwen
+        ;;
+    shell)
+        project_account
+        gateway_env=()
+        if [[ -f /etc/ai-bootstrap/model-gateway.json ]] && gateway_host=$(gateway_address 2>/dev/null); then
+            gateway_env=(--env "AI_GATEWAY_HOST=$gateway_host")
+        fi
         args=(--interactive)
         if [[ -t 0 && -t 1 ]]; then
             args+=(--tty)
@@ -291,7 +303,7 @@ case $action in
         if [[ $# == 0 ]]; then
             set -- /bin/bash -l
         fi
-        as_project podman exec "${args[@]}" project "$@"
+        as_project podman exec "${args[@]}" "${gateway_env[@]}" project "$@"
         ;;
-    *) die 'expected create or shell' ;;
+    *) die 'expected create, qwen-setup or shell' ;;
 esac

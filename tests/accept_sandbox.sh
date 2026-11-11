@@ -82,7 +82,9 @@ check_isolation() {
         slice=/sys/fs/cgroup/user.slice/user-$uid.slice
         read -r quota period < "$slice/cpu.max"
         [[ $quota == "$period" ]]
-        [[ $(<"$slice/memory.max") == 402653184 ]]
+        expected_memory=402653184
+        [[ ! -f /etc/systemd/system/user-$uid.slice.d/95-qwen.conf ]] || expected_memory=805306368
+        [[ $(<"$slice/memory.max") == "$expected_memory" ]]
         [[ $(<"$slice/pids.max") == 256 ]]
         for path in /var/lib/ai-sandboxes /home/owner/.ssh /root/.ssh /etc/ai-bootstrap \
             /run/podman/podman.sock "/run/user/$uid/podman/podman.sock"; do

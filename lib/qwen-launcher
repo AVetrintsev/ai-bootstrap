@@ -10,7 +10,8 @@ try:
 except (OSError, ValueError):
     sys.exit("Model gateway is not configured. Open the sandbox with ai-sandbox shell PROJECT.")
 environment = dict(os.environ)
-environment.update(OPENAI_API_KEY=settings["api_key"], OPENAI_BASE_URL=settings["base_url"],
+base_url = "http://" + environment["AI_GATEWAY_HOST"] + ":18081/v1" if environment.get("AI_GATEWAY_HOST") else settings["base_url"]
+environment.update(OPENAI_API_KEY=settings["api_key"], OPENAI_BASE_URL=base_url,
                    OPENAI_MODEL=settings["model"], QWEN_MODEL=settings["model"])
 environment.setdefault("NODE_OPTIONS", "--max-old-space-size=512")
 os.execve("/opt/ai-qwen/bin/qwen",

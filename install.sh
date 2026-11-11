@@ -270,6 +270,15 @@ configure_model_gateway() {
     if [[ $(cat "$work/model-gateway.json") == null ]]; then
         quiet 'could not stop model gateway' systemctl disable --now ai-bootstrap-models.service
         rm -f -- "$etc/model-gateway.json"
+        local account uid
+        while IFS=: read -r account _ uid _; do
+            [[ $account == aisbx-* && $uid -ge 60001 && $uid -le 60999 ]] || continue
+            if [[ -f /etc/systemd/system/user-$uid.slice.d/95-qwen.conf ]]; then
+                rm -f -- "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf"
+                systemctl daemon-reload
+                systemctl set-property --runtime "user-$uid.slice" MemoryMax=384M
+            fi
+        done < <(getent passwd)
         skip_reason='model_gateway is not configured'
         return
     fi
