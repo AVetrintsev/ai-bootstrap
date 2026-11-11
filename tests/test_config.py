@@ -15,6 +15,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(resources, "80 80\n")
 
+    def test_rejects_invalid_shared_resource_percentages(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        for field in ("memory_percent", "cpu_percent"):
+            for value in ("0", "101", "true", "50.5", "'80'"):
+                with self.subTest(field=field, value=value):
+                    result, _ = self.stage(example.replace(field + ": 80", field + ": " + value))
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("sandbox." + field, result.stderr)
+
     def test_all_ipv4_ssh_access_requires_explicit_setting(self):
         example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
         config = "ssh:\n  allow_from_any_ipv4: true\n" + example[example.index("portal:"):]

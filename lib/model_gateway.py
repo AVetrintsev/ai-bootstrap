@@ -213,7 +213,8 @@ class Handler(BaseHTTPRequestHandler):
                              {"Authorization": "Bearer " + key, "Content-Type": "application/json"})
             response = upstream.getresponse()
             if response.status != 200:
-                self.error(502, "provider_error", "The model provider rejected the request.")
+                status = 403 if response.status in (401, 403) else response.status if 400 <= response.status < 500 else 502
+                self.error(status, "provider_error", f"The model provider rejected the request (HTTP {response.status}); check provider access and configuration.")
                 return
             if outgoing.get("stream"):
                 self.send_response(200)

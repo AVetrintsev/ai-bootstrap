@@ -10,6 +10,11 @@ work=$(mktemp -d /run/ai-model-accept.XXXXXX)
 marker=ai-qwen-accept-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
 changed=no
 cleanup() {
+    local result=$?
+    if [[ $result != 0 && -f $work/qwen.jsonl ]]; then
+        install -m 0600 "$work/qwen.jsonl" /var/lib/ai-models/last-acceptance.log
+        echo 'Qwen acceptance failed; private diagnostic: /var/lib/ai-models/last-acceptance.log' >&2
+    fi
     if [[ $changed == yes ]]; then
         install -m 0640 -o root -g ai-models "$work/config.json" "$config.restore"
         mv -fT "$config.restore" "$config"
@@ -43,7 +48,7 @@ for port in [22,8080]:
  raise AssertionError('Unexpected access to host port '+str(port))
 print('OK gateway access, denied model and host isolation')
 PY
-prompt="Use the shell tool to run: printf '%s' '$marker' > /tmp/$marker . Execute that command, then reply DONE. Do not read other files."
+prompt="Run exactly this shell command: printf '%s' '$marker' > /tmp/$marker"$'\n'"Then reply DONE. Do not read other files."
 timeout 180 ai-sandbox shell "$project" bash -c \
     'cd /tmp; exec qwen --model "$1" -p "$2" --approval-mode yolo --output-format stream-json' \
     _ "$model" "$prompt" < /dev/null > "$work/qwen.jsonl" 2>&1

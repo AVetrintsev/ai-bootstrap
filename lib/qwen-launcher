@@ -8,11 +8,16 @@ import sys
 try:
     settings = json.loads(Path("/root/.config/ai-bootstrap/model-gateway.json").read_text())
 except (OSError, ValueError):
-    sys.exit("Model gateway is not configured. Open the sandbox with ai-sandbox shell PROJECT.")
+    sys.exit("Model gateway is not configured. Run sudo ai-sandbox qwen-setup PROJECT on the host.")
 environment = dict(os.environ)
 base_url = "http://" + environment["AI_GATEWAY_HOST"] + ":18081/v1" if environment.get("AI_GATEWAY_HOST") else settings["base_url"]
 environment.update(OPENAI_API_KEY=settings["api_key"], OPENAI_BASE_URL=base_url,
                    OPENAI_MODEL=settings["model"], QWEN_MODEL=settings["model"])
 environment.setdefault("NODE_OPTIONS", "--max-old-space-size=512")
-os.execve("/opt/ai-qwen/bin/qwen",
-          ["qwen", "--auth-type", "openai", "--model", settings["model"], *sys.argv[1:]], environment)
+arguments = sys.argv[1:]
+defaults = []
+if not any(arg == "--auth-type" or arg.startswith("--auth-type=") for arg in arguments):
+    defaults += ["--auth-type", "openai"]
+if not any(arg in ("--model", "-m") or arg.startswith(("--model=", "-m=")) for arg in arguments):
+    defaults += ["--model", settings["model"]]
+os.execve("/opt/ai-qwen/bin/qwen", ["qwen", *defaults, *arguments], environment)

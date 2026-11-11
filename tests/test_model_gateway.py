@@ -164,7 +164,7 @@ class GatewayTests(unittest.TestCase):
         request = {"model": "coder", "messages": []}
         for _ in range(2):
             status, body = self.request(request)
-            self.assertEqual(status, 502)
+            self.assertEqual(status, 403)
             self.assertNotIn(b"test-provider-secret", body)
         self.assertEqual(self.request(request)[0], 429)
 

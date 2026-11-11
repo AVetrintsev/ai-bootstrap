@@ -51,7 +51,14 @@ publish_unit() {
 }
 
 configure_resources() {
-    local slice=ai-sandboxes-$uid.slice group
+    local slice=ai-sandboxes-$uid.slice group restart=no
+    group=$(systemctl show "user@$uid.service" --property=ControlGroup --value)
+    if systemctl is-active --quiet "user@$uid.service" && [[ $group != /ai.slice/ai-sandboxes.slice/$slice/* ]]; then
+        # Stop the container while its original user manager and cgroup still exist.
+        as_project systemctl --user stop "$unit"
+        systemctl stop "user@$uid.service"
+        restart=yes
+    fi
     install -d -m 0755 "/etc/systemd/system/user@$uid.service.d"
     publish_unit "/etc/systemd/system/$slice" <<'EOF'
 [Slice]
@@ -68,10 +75,16 @@ EOF
         "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf"
     systemctl daemon-reload
     systemctl start ai-bootstrap-sandbox-resources.service
-    group=$(systemctl show "user@$uid.service" --property=ControlGroup --value)
-    if systemctl is-active --quiet "user@$uid.service" && [[ $group != /ai.slice/ai-sandboxes.slice/$slice/* ]]; then
+    if [[ $restart == yes || -f /var/lib/systemd/linger/$user ]]; then
         # Reparent the user manager once; persistent container storage stays in place.
-        systemctl restart "user@$uid.service"
+        systemctl start "user@$uid.service"
+        for attempt in {1..30}; do
+            if as_project podman exec project /usr/bin/true >/dev/null 2>&1; then
+                return
+            fi
+            sleep 1
+        done
+        die 'sandbox did not restart after applying the shared resource pool'
     fi
 }
 
