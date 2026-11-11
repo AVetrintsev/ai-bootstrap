@@ -1,0 +1,25 @@
+[Unit]
+Description=AI Bootstrap project model gateway
+Requires=ai-bootstrap-firewall.service
+After=ai-bootstrap-firewall.service ai-bootstrap-mihomo.service
+
+[Service]
+User=ai-models
+Group=ai-models
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/model_gateway.py serve
+StateDirectory=ai-models
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=1024
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

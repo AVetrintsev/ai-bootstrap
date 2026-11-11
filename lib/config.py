@@ -1,6 +1,7 @@
 """Validate the operator YAML and stage the profile and firewall."""
 
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -156,11 +157,20 @@ def stage(config_path, work):
     validate_profile(profile)
     sandbox_enabled = "sandbox" in config
     internal_tcp = sandbox_internal_tcp(mapping(config.get("sandbox", {}), "sandbox"))
+    gateway = config.get("model_gateway")
+    if gateway is not None:
+        if not sandbox_enabled:
+            raise ValueError("model_gateway requires sandbox")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from model_gateway import validate_settings
+        gateway = validate_settings(gateway)
 
     template = Path(__file__).resolve().parent / "firewall.nft"
     rules = template.read_text(encoding="utf-8").replace("@ADMIN_IPV4@", ", ".join(map(str, networks)))
     rules = rules.replace("@SANDBOX_UID_RANGE@", f"{SANDBOX_UID_MIN}-{SANDBOX_UID_MAX}")
     rules = rules.replace("@SANDBOX_INTERNAL_TCP@", internal_tcp)
+    gateway_rule = "fib daddr type local tcp dport 18081 accept" if gateway is not None else ""
+    rules = rules.replace("@MODEL_GATEWAY_ROUTE@", gateway_rule).replace("@MODEL_GATEWAY_EGRESS@", gateway_rule)
     rules = rules.replace(
         "@SANDBOX_ROUTE@", "jump sandbox_route" if sandbox_enabled else "drop"
     ).replace(
@@ -172,6 +182,7 @@ def stage(config_path, work):
     (work / "admin-ipv4").write_text("\n".join(map(str, networks)), encoding="utf-8")
     (work / "profile.yaml").write_text(profile, encoding="utf-8")
     (work / "portal-transport").write_text(transport + "\n", encoding="utf-8")
+    (work / "model-gateway.json").write_text(json.dumps(gateway) + "\n", encoding="utf-8")
     enabled = "yes" if sandbox_enabled else "no"
     (work / "sandbox-settings").write_text(
         f"{enabled} {SANDBOX_UID_MIN} {SANDBOX_UID_MAX}\n", encoding="utf-8"

@@ -23,6 +23,7 @@ table inet ai_bootstrap {
 
     chain sandbox_route {
         meta nfproto ipv6 drop
+        @MODEL_GATEWAY_ROUTE@
         fib daddr type { local, broadcast, multicast } drop
         ip daddr . tcp dport @sandbox_internal_tcp accept
         ip daddr @sandbox_private drop
@@ -31,6 +32,7 @@ table inet ai_bootstrap {
 
     chain sandbox_egress {
         meta nfproto ipv6 drop
+        @MODEL_GATEWAY_EGRESS@
         ip daddr . tcp dport @sandbox_internal_tcp accept
         oifname "ai-mihomo" accept
         drop

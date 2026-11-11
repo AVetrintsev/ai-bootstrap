@@ -18,10 +18,23 @@ import model_gateway
 
 class Provider(BaseHTTPRequestHandler):
     requests = []
+    fail = False
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.requests.append((self.path, self.headers.get("Authorization"), body))
+        if self.fail:
+            response = b'test-provider-secret: upstream failure details'
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(response)
+            return
+        if body.get("stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"run_shell_command","arguments":"{}"}}]}}]}\n\ndata: [DONE]\n\n')
+            return
         response = json.dumps({"choices": [{"message": {"role": "assistant", "content": "ready"}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -49,6 +62,7 @@ class GatewayTests(unittest.TestCase):
         self.addCleanup(lambda: os.environ.pop("SSL_CERT_FILE", None) if previous is None
                         else os.environ.__setitem__("SSL_CERT_FILE", previous))
         Provider.requests = []
+        Provider.fail = False
         self.provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(certificate, private_key)
@@ -82,6 +96,7 @@ class GatewayTests(unittest.TestCase):
         connection.request("POST" if body is not None else "GET", path,
                            json.dumps(body) if body is not None else None, headers)
         response = connection.getresponse()
+        self.content_type = response.getheader("Content-Type")
         result = response.status, response.read()
         connection.close()
         return result
@@ -115,6 +130,49 @@ class GatewayTests(unittest.TestCase):
         beta = model_gateway.provision(self.config, self.state, "beta")
         self.assertEqual(self.request(request, token=beta["api_key"])[0], 200)
         self.assertEqual(len(Provider.requests), 3)
+
+    def test_streaming_tool_calls_and_output_limits_cannot_be_overridden(self):
+        status, body = self.request({"model": "coder", "messages": [], "stream": True,
+                                     "max_tokens": 128, "max_completion_tokens": 999999, "n": 5})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.content_type, "text/event-stream")
+        self.assertIn(b'"tool_calls"', body)
+        self.assertIn(b'data: [DONE]', body)
+        upstream = Provider.requests[0][2]
+        self.assertEqual(upstream["n"], 1)
+        self.assertEqual(upstream["max_tokens"], 128)
+        self.assertNotIn("max_completion_tokens", upstream)
+
+    def test_project_can_only_discover_and_call_its_allowed_models(self):
+        settings = json.loads(self.config.read_text())
+        settings["models"]["other"] = {"provider": "test", "model": "other-upstream"}
+        settings["projects"]["beta"] = {"models": ["other"], "requests_per_day": 1, "max_output_tokens": 64}
+        self.config.write_text(json.dumps(settings))
+        beta = model_gateway.provision(self.config, self.state, "beta")
+        status, body = self.request(path="/v1/models", token=beta["api_key"])
+        self.assertEqual(status, 200)
+        self.assertEqual([m["id"] for m in json.loads(body)["data"]], ["other"])
+        self.assertNotIn("provider", body.decode())
+        self.assertEqual(self.request({"model": "coder", "messages": [], "project": "alpha"}, token=beta["api_key"])[0], 403)
+        self.assertEqual(self.request(path="/v1/models", token="invalid")[0], 401)
+        self.assertEqual(self.request(path="/config")[0], 404)
+        self.assertEqual(self.request({"model": "other", "messages": []})[0], 403)
+
+    def test_provider_errors_do_not_reveal_credentials_and_failed_attempts_use_quota(self):
+        Provider.fail = True
+        request = {"model": "coder", "messages": []}
+        for _ in range(2):
+            status, body = self.request(request)
+            self.assertEqual(status, 502)
+            self.assertNotIn(b"test-provider-secret", body)
+        self.assertEqual(self.request(request)[0], 429)
+
+    def test_rejects_insecure_provider_configuration_before_serving(self):
+        settings = json.loads(self.config.read_text())
+        settings["providers"]["test"]["base_url"] = "http://example.com/v1"
+        self.config.write_text(json.dumps(settings))
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            model_gateway.make_server(self.config, self.state, ("127.0.0.1", 0))
 
 
 if __name__ == "__main__":

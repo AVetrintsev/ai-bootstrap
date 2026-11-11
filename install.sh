@@ -257,6 +257,35 @@ configure_sandbox() {
     publish "$work/sandbox-settings" "$etc/sandbox-settings" 600
 }
 
+configure_model_gateway() {
+    service_account ai-models /var/lib/ai-models
+    install -d -o ai-models -g ai-models -m 0700 /var/lib/ai-models
+    install -d -o root -g ai-models -m 0750 "$etc/model-keys"
+    publish "$release/lib/model_gateway.py" "$libexec/model_gateway.py" 644
+    publish "$release/lib/model-key.py" /usr/local/sbin/ai-model-key 755
+    publish "$release/lib/qwen-setup.sh" "$libexec/qwen-setup.sh" 644
+    publish "$release/lib/qwen-launcher" "$libexec/qwen-launcher" 755
+    publish "$release/lib/ai-bootstrap-models.service" /etc/systemd/system/ai-bootstrap-models.service 644
+    quiet 'could not load model gateway unit' systemctl daemon-reload
+    if [[ $(cat "$work/model-gateway.json") == null ]]; then
+        quiet 'could not stop model gateway' systemctl disable --now ai-bootstrap-models.service
+        rm -f -- "$etc/model-gateway.json"
+        skip_reason='model_gateway is not configured'
+        return
+    fi
+    publish "$work/model-gateway.json" "$etc/model-gateway.json" 640 ai-models
+    quiet 'could not start model gateway' systemctl restart ai-bootstrap-models.service
+    quiet 'could not enable model gateway' systemctl enable ai-bootstrap-models.service
+    local status
+    for attempt in {1..20}; do
+        status=$(curl -q --noproxy '*' --silent --max-time 2 --output /dev/null \
+            --write-out '%{http_code}' http://127.0.0.1:18081/v1/models) || true
+        [[ $status == 401 ]] && return
+        sleep 1
+    done
+    fail 'model gateway did not reject an unauthenticated readiness request'
+}
+
 portal_admin() {
     runuser -u ai-portal -- /usr/bin/python3 -I "$libexec/portal.py" "$@"
 }
@@ -365,6 +394,7 @@ if [[ $sandbox_enabled == yes ]]; then
     run_step sandbox_packages
 fi
 run_step configure_sandbox
+run_step configure_model_gateway
 if [[ $portal_transport == local-http ]]; then
     run_step portal_packages
     run_step configure_portal

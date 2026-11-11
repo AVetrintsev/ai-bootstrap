@@ -25,7 +25,47 @@ PROJECT = re.compile(r"[a-z][a-z0-9-]{0,23}")
 
 
 def configuration(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    return validate_settings(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def validate_settings(settings):
+    if not isinstance(settings, dict):
+        raise ValueError("model_gateway must be a mapping")
+    providers, models = settings.get("providers"), settings.get("models")
+    if not isinstance(providers, dict) or not providers or not isinstance(models, dict) or not models:
+        raise ValueError("model_gateway requires providers and models")
+    for name, provider in providers.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) or not isinstance(provider, dict):
+            raise ValueError("invalid model_gateway provider")
+        try:
+            endpoint = urlsplit(provider.get("base_url", ""))
+            if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username or endpoint.password or endpoint.query or endpoint.fragment:
+                raise ValueError
+            if endpoint.port is not None and not 1 <= endpoint.port <= 65535:
+                raise ValueError
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("model_gateway providers require an HTTPS base_url without credentials, query or fragment") from None
+        key_file = provider.get("key_file")
+        if not isinstance(key_file, str) or not key_file.startswith("/") or "\n" in key_file or "\x00" in key_file:
+            raise ValueError("model_gateway provider key_file must be an absolute host path")
+    for alias, model in models.items():
+        if not isinstance(alias, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9/_.:-]{0,127}", alias) or not isinstance(model, dict):
+            raise ValueError("invalid model_gateway model alias")
+        if not isinstance(model.get("provider"), str) or model["provider"] not in providers or not isinstance(model.get("model"), str) or not model["model"].strip():
+            raise ValueError("model_gateway model requires a known provider and upstream model")
+    projects = settings.get("projects", {})
+    if not isinstance(projects, dict) or any(not isinstance(name, str) or not PROJECT.fullmatch(name) for name in projects):
+        raise ValueError("invalid model_gateway projects")
+    for policy in [settings.get("defaults"), *projects.values()]:
+        if not isinstance(policy, dict):
+            raise ValueError("model_gateway requires default and project policies")
+        allowed = policy.get("models")
+        if not isinstance(allowed, list) or not allowed or any(not isinstance(model, str) or model not in models for model in allowed):
+            raise ValueError("model_gateway policy must allow known models")
+        for field, minimum, maximum in (("requests_per_day", 0, 1000000), ("max_output_tokens", 1, 65536)):
+            if type(policy.get(field)) is not int or not minimum <= policy[field] <= maximum:
+                raise ValueError(f"model_gateway policy {field} is outside the permitted range")
+    return settings
 
 
 @contextmanager
@@ -147,15 +187,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         model = settings["models"][alias]
         provider = settings["providers"][model["provider"]]
+        tokens = body.get("max_tokens", body.get("max_completion_tokens", policy["max_output_tokens"]))
+        if type(tokens) is not int or tokens < 1 or not isinstance(body.get("messages"), list) or type(body.get("stream", False)) is not bool:
+            self.error(400, "invalid_request", "Invalid messages, stream or output token limit.")
+            return
         if not reserve_request(self.server.state, project, policy["requests_per_day"]):
             self.error(429, "project_quota_exceeded", "The project's daily request limit is exhausted; it resets at 00:00 UTC.")
             return
-        outgoing = dict(body)
+        outgoing = {key: value for key, value in body.items() if key in {
+            "messages", "tools", "tool_choice", "temperature", "top_p", "stop", "seed",
+            "frequency_penalty", "presence_penalty", "parallel_tool_calls", "response_format",
+            "stream", "stream_options", "enable_thinking", "reasoning_effort",
+        }}
         outgoing["model"] = model["model"]
-        outgoing["max_tokens"] = policy["max_output_tokens"]
+        outgoing["max_tokens"] = min(tokens, policy["max_output_tokens"])
+        outgoing["n"] = 1
         endpoint = urlsplit(provider["base_url"])
         upstream = http.client.HTTPSConnection(endpoint.hostname, endpoint.port or 443,
                                                timeout=120, context=ssl.create_default_context())
+        started = False
         try:
             key = Path(provider["key_file"]).read_text(encoding="utf-8").strip()
             upstream.request("POST", endpoint.path.rstrip("/") + "/chat/completions",
@@ -165,6 +215,20 @@ class Handler(BaseHTTPRequestHandler):
             if response.status != 200:
                 self.error(502, "provider_error", "The model provider rejected the request.")
                 return
+            if outgoing.get("stream"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                started = True
+                total = 0
+                while chunk := response.read1(65536):
+                    total += len(chunk)
+                    if total > 32 * 1024 * 1024:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                return
             data = response.read(32 * 1024 * 1024 + 1)
             if len(data) > 32 * 1024 * 1024:
                 self.error(502, "provider_error", "The provider response exceeded the size limit.")
@@ -173,14 +237,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
+            started = True
             self.wfile.write(data)
         except (OSError, ValueError, http.client.HTTPException):
-            self.error(502, "provider_unavailable", "The model provider is unavailable.")
+            if not started:
+                self.error(502, "provider_unavailable", "The model provider is unavailable.")
         finally:
             upstream.close()
 
 
 def make_server(config, state, address):
+    configuration(config)
     server = ThreadingHTTPServer(address, Handler)
     server.config = Path(config)
     server.state = Path(state)
@@ -196,9 +263,14 @@ def main():
     commands.add_parser("serve")
     project = commands.add_parser("provision")
     project.add_argument("project")
+    revoke = commands.add_parser("revoke")
+    revoke.add_argument("project")
     args = parser.parse_args()
     if args.command == "provision":
         print(json.dumps(provision(args.config, args.state, args.project)))
+    elif args.command == "revoke":
+        with database(args.state) as connection:
+            connection.execute("DELETE FROM projects WHERE name = ?", (args.project,))
     else:
         make_server(args.config, args.state, ("0.0.0.0", PORT)).serve_forever()
 

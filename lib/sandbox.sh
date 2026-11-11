@@ -114,6 +114,45 @@ base_archive() {
         die 'cached base archive failed the release SHA-256 check'
 }
 
+configure_qwen() {
+    [[ -f /etc/ai-bootstrap/model-gateway.json ]] || return 0
+    local gateway_host client
+    gateway_host=$(python3 -I -c '
+import ipaddress,json,subprocess
+routes=json.loads(subprocess.check_output(["ip","-4","-j","route","show","default"]))
+for route in routes:
+ for interface in json.loads(subprocess.check_output(["ip","-4","-j","address","show","dev",route["dev"]])):
+  for address in interface["addr_info"]:
+   if address["scope"] == "global":
+    print(ipaddress.IPv4Address(address["local"])); raise SystemExit
+raise SystemExit("No host IPv4 address for the model gateway")
+') || die 'could not determine the model gateway address'
+    install -d -m 0755 "/etc/systemd/system/user-$uid.slice.d"
+    publish_unit "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf" <<'EOF'
+[Slice]
+MemoryMax=768M
+EOF
+    systemctl daemon-reload
+    systemctl set-property --runtime "user-$uid.slice" MemoryMax=768M
+    # The installed release pins Qwen; all package changes remain inside this container.
+    source /etc/ai-bootstrap/sandbox-release.env
+    as_project podman exec --interactive project /bin/bash -s -- "$QWEN_CODE_VERSION" \
+        < /usr/local/libexec/ai-bootstrap/qwen-setup.sh
+    as_project podman cp /usr/local/libexec/ai-bootstrap/qwen-launcher project:/usr/local/bin/qwen
+    as_project podman exec project chmod 0755 /usr/local/bin/qwen
+    client=$(runuser -u ai-models -- python3 -I /usr/local/libexec/ai-bootstrap/model_gateway.py provision "$project")
+    printf '%s' "$client" | as_project podman exec --interactive --env "AI_GATEWAY_HOST=$gateway_host" project python3 -I -c '
+import json,os,pathlib,sys
+settings=json.load(sys.stdin)
+settings["base_url"]="http://"+os.environ["AI_GATEWAY_HOST"]+":18081/v1"
+directory=pathlib.Path("/root/.config/ai-bootstrap")
+directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+path=directory/"model-gateway.json"
+path.write_text(json.dumps(settings))
+path.chmod(0o600)
+'
+}
+
 create_project() {
     [[ $# == 0 ]] || die 'create expects one project name'
     [[ $enabled == yes ]] || die 'enable sandbox in config.yaml and rerun the installer'
@@ -155,6 +194,7 @@ create_project() {
     for attempt in {1..20}; do
         if as_project podman exec project /usr/bin/true >/dev/null 2>&1; then
             loginctl enable-linger "$user"
+            configure_qwen
             return
         fi
         sleep 1
@@ -210,6 +250,9 @@ github_delete() {
         fi
         return 0
     fi
+    if [[ -f /var/lib/ai-models/gateway.sqlite3 ]]; then
+        runuser -u ai-models -- python3 -I /usr/local/libexec/ai-bootstrap/model_gateway.py revoke "$project"
+    fi
     if ! id "$user" >/dev/null 2>&1; then
         [[ ! -e $project_dir/disk.ext4 ]] && ! mountpoint -q -- "$disk" || die 'project account is missing'
         return 0
@@ -226,6 +269,7 @@ github_delete() {
         "/etc/systemd/system/$mount_unit" \
         "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" \
         "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf"
+    rm -f -- "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf"
     systemctl daemon-reload
     userdel "$user"
 }
@@ -239,6 +283,7 @@ case $action in
     github-delete) github_delete "$@" ;;
     shell)
         project_account
+        configure_qwen
         args=(--interactive)
         if [[ -t 0 && -t 1 ]]; then
             args+=(--tty)

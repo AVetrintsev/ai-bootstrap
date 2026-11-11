@@ -2,4 +2,6 @@
 *.service text eol=lf
 *.socket text eol=lf
 lib/github-credential text eol=lf
+lib/qwen-launcher text eol=lf
+lib/model-key.py text eol=lf
 release.env text eol=lf
