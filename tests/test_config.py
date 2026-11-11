@@ -9,6 +9,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class ConfigTests(unittest.TestCase):
+    def test_all_ipv4_ssh_access_requires_explicit_setting(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        config = "ssh:\n  allow_from_any_ipv4: true\n" + example[example.index("portal:"):]
+        result, firewall = self.stage(config, artifact="firewall.nft")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("elements = { 0.0.0.0/0 }", firewall)
+
     def stage(self, content, mode=0o600, artifact="profile.yaml"):
         with tempfile.TemporaryDirectory() as directory:
             work = pathlib.Path(directory)

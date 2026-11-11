@@ -138,14 +138,17 @@ def stage(config_path, work):
         raise ValueError("cannot read config as a regular UTF-8 file") from None
 
     ssh = mapping(config.get("ssh"), "ssh")
-    admins = ssh.get("admin_ipv4")
+    any_ipv4 = ssh.get("allow_from_any_ipv4", False)
+    if type(any_ipv4) is not bool or (any_ipv4 and "admin_ipv4" in ssh):
+        raise ValueError("ssh.allow_from_any_ipv4 must be boolean and cannot be combined with admin_ipv4")
+    admins = ["0.0.0.0/0"] if any_ipv4 else ssh.get("admin_ipv4")
     if not isinstance(admins, list) or not admins or not all(isinstance(item, str) for item in admins):
         raise ValueError("ssh.admin_ipv4 must list administrator IPv4 addresses or CIDRs")
     try:
         networks = tuple(ipaddress.collapse_addresses(ipaddress.IPv4Network(item) for item in admins))
     except ValueError:
         raise ValueError("ssh.admin_ipv4 contains an invalid IPv4 address or CIDR") from None
-    if networks[0].prefixlen == 0:
+    if networks[0].prefixlen == 0 and not any_ipv4:
         raise ValueError("ssh.admin_ipv4 must restrict access to administrator networks")
 
     transport = validate_portal(mapping(config.get("portal", {}), "portal"))

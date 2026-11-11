@@ -1,6 +1,6 @@
 ssh:
-  admin_ipv4:
-    - 192.0.2.24/32
+  allow_from_any_ipv4: true
+  # Для ограничения источников удалите allow_from_any_ipv4 и задайте admin_ipv4: [192.0.2.24/32].
 
 portal:
   transport: local-http
