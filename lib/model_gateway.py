@@ -1,0 +1,185 @@
+"""Project-scoped OpenAI-compatible model access; provider credentials stay on the host."""
+
+import argparse
+import hashlib
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import sqlite3
+import ssl
+import sys
+from urllib.parse import urlsplit
+
+
+CONFIG = Path("/etc/ai-bootstrap/model-gateway.json")
+STATE = Path("/var/lib/ai-models")
+PORT = 18081
+MAX_BODY = 2 * 1024 * 1024
+PROJECT = re.compile(r"[a-z][a-z0-9-]{0,23}")
+
+
+def configuration(path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def database(state):
+    state = Path(state)
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    connection = sqlite3.connect(state / "gateway.sqlite3", timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute("CREATE TABLE IF NOT EXISTS projects (name TEXT PRIMARY KEY, token TEXT NOT NULL, digest TEXT UNIQUE NOT NULL)")
+    connection.commit()
+    return connection
+
+
+def provision(config, state, project):
+    if not PROJECT.fullmatch(project):
+        raise ValueError("invalid project name")
+    settings = configuration(config)
+    policy = settings.get("projects", {}).get(project, settings["defaults"])
+    with database(state) as connection:
+        token = secrets.token_urlsafe(32)
+        connection.execute("INSERT OR IGNORE INTO projects VALUES (?, ?, ?)",
+                           (project, token, hashlib.sha256(token.encode()).hexdigest()))
+        row = connection.execute("SELECT token FROM projects WHERE name = ?", (project,)).fetchone()
+    return {"api_key": row["token"], "model": policy["models"][0],
+            "models": policy["models"], "max_output_tokens": policy["max_output_tokens"]}
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"
+    server_version = "AIModelGateway"
+    sys_version = ""
+
+    def setup(self):
+        self.request.settimeout(30)
+        super().setup()
+
+    def log_message(self, *_):
+        # Requests may contain workspace text or credentials. Do not log them.
+        pass
+
+    def reply(self, status, body):
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def error(self, status, code, message):
+        self.reply(status, {"error": {"type": code, "code": code, "message": message}})
+
+    def authorize(self):
+        authorization = self.headers.get("Authorization", "")
+        if not authorization.startswith("Bearer ") or len(authorization) > 256:
+            self.error(401, "invalid_api_key", "A project gateway key is required.")
+            return None
+        digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
+        with database(self.server.state) as connection:
+            row = connection.execute("SELECT name FROM projects WHERE digest = ?", (digest,)).fetchone()
+        if row is None:
+            self.error(401, "invalid_api_key", "Unknown project gateway key.")
+            return None
+        settings = configuration(self.server.config)
+        policy = settings.get("projects", {}).get(row["name"], settings["defaults"])
+        return row["name"], settings, policy
+
+    def do_GET(self):
+        authorized = self.authorize()
+        if authorized is None:
+            return
+        if self.path != "/v1/models":
+            self.error(404, "not_found", "Unknown gateway endpoint.")
+            return
+        _, _, policy = authorized
+        self.reply(200, {"object": "list", "data": [
+            {"id": model, "object": "model", "owned_by": "project"} for model in policy["models"]
+        ]})
+
+    def do_POST(self):
+        authorized = self.authorize()
+        if authorized is None:
+            return
+        if self.path != "/v1/chat/completions":
+            self.error(404, "not_found", "Unknown gateway endpoint.")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if self.headers.get("Transfer-Encoding") or not 0 < length <= MAX_BODY:
+                raise ValueError
+            raw = self.rfile.read(length)
+            if len(raw) != length:
+                raise ValueError
+            body = json.loads(raw)
+            if not isinstance(body, dict):
+                raise ValueError
+        except (ValueError, UnicodeError):
+            self.error(400, "invalid_request", "Expected a JSON request of at most 2 MiB.")
+            return
+        _, settings, policy = authorized
+        alias = body.get("model")
+        if not isinstance(alias, str) or alias not in policy["models"]:
+            self.error(403, "model_not_allowed", "This model is not enabled for the project.")
+            return
+        model = settings["models"][alias]
+        provider = settings["providers"][model["provider"]]
+        outgoing = dict(body)
+        outgoing["model"] = model["model"]
+        outgoing["max_tokens"] = policy["max_output_tokens"]
+        endpoint = urlsplit(provider["base_url"])
+        upstream = http.client.HTTPSConnection(endpoint.hostname, endpoint.port or 443,
+                                               timeout=120, context=ssl.create_default_context())
+        try:
+            key = Path(provider["key_file"]).read_text(encoding="utf-8").strip()
+            upstream.request("POST", endpoint.path.rstrip("/") + "/chat/completions",
+                             json.dumps(outgoing).encode(),
+                             {"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+            response = upstream.getresponse()
+            if response.status != 200:
+                self.error(502, "provider_error", "The model provider rejected the request.")
+                return
+            data = response.read(32 * 1024 * 1024 + 1)
+            if len(data) > 32 * 1024 * 1024:
+                self.error(502, "provider_error", "The provider response exceeded the size limit.")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (OSError, ValueError, http.client.HTTPException):
+            self.error(502, "provider_unavailable", "The model provider is unavailable.")
+        finally:
+            upstream.close()
+
+
+def make_server(config, state, address):
+    server = ThreadingHTTPServer(address, Handler)
+    server.config = Path(config)
+    server.state = Path(state)
+    return server
+
+
+def main():
+    os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=CONFIG)
+    parser.add_argument("--state", type=Path, default=STATE)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("serve")
+    project = commands.add_parser("provision")
+    project.add_argument("project")
+    args = parser.parse_args()
+    if args.command == "provision":
+        print(json.dumps(provision(args.config, args.state, args.project)))
+    else:
+        make_server(args.config, args.state, ("0.0.0.0", PORT)).serve_forever()
+
+
+if __name__ == "__main__":
+    main()
