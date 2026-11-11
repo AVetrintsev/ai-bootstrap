@@ -51,11 +51,19 @@ publish_unit() {
 }
 
 configure_resources() {
-    local slice=ai-sandboxes-$uid.slice group restart=no
+    local slice=ai-sandboxes-$uid.slice group restart=no manager_active=no container_active=no
     group=$(systemctl show "user@$uid.service" --property=ControlGroup --value)
-    if systemctl is-active --quiet "user@$uid.service" && [[ $group != /ai.slice/ai-sandboxes.slice/$slice/* ]]; then
+    if systemctl is-active --quiet "user@$uid.service"; then
+        manager_active=yes
+        if as_project systemctl --user is-active --quiet "$unit"; then
+            container_active=yes
+        fi
+    fi
+    if [[ $manager_active == yes && $group != /ai.slice/ai-sandboxes.slice/$slice/* ]]; then
         # Stop the container while its original user manager and cgroup still exist.
-        as_project systemctl --user stop "$unit"
+        if [[ $container_active == yes ]]; then
+            as_project systemctl --user stop "$unit"
+        fi
         systemctl stop "user@$uid.service"
         restart=yes
     fi
@@ -78,6 +86,15 @@ EOF
     if [[ $restart == yes || -f /var/lib/systemd/linger/$user ]]; then
         # Reparent the user manager once; persistent container storage stays in place.
         systemctl start "user@$uid.service"
+        if [[ $container_active == yes && $restart == yes ]]; then
+            as_project systemctl --user start "$unit"
+        elif [[ $container_active != yes ]]; then
+            # A failed initial create may have a user manager but no container yet.
+            if [[ $restart == no && $manager_active == yes ]] ||
+                ! as_project systemctl --user is-enabled --quiet "$unit" 2>/dev/null; then
+                return
+            fi
+        fi
         for attempt in {1..30}; do
             if as_project podman exec project /usr/bin/true >/dev/null 2>&1; then
                 return

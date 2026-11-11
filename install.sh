@@ -261,7 +261,8 @@ configure_sandbox() {
     publish "$release/lib/ai-bootstrap-sandbox-resources.service" /etc/systemd/system/ai-bootstrap-sandbox-resources.service 644
     systemctl daemon-reload
     systemctl enable ai-bootstrap-sandbox-resources.service
-    systemctl restart ai-bootstrap-sandbox-resources.service
+    systemctl start ai-bootstrap-sandbox-resources.service
+    systemctl reload ai-bootstrap-sandbox-resources.service
     local account uid
     while IFS=: read -r account _ uid _; do
         [[ $account == aisbx-* && $uid -ge 60001 && $uid -le 60999 ]] || continue

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
-[[ $EUID == 0 && $# == 2 ]] || { echo 'Usage: sudo bash tests/accept_model_gateway.sh PROJECT MODEL' >&2; exit 1; }
+[[ $EUID == 0 && ( $# == 2 || ( $# == 3 && $3 == --api-only ) ) ]] || {
+    echo 'Usage: sudo bash tests/accept_model_gateway.sh PROJECT MODEL [--api-only]' >&2; exit 1;
+}
 project=$1
 model=$2
 [[ $project =~ ^[a-z][a-z0-9-]{0,23}$ ]] || exit 1
@@ -9,6 +11,11 @@ config=/etc/ai-bootstrap/model-gateway.json
 work=$(mktemp -d /run/ai-model-accept.XXXXXX)
 marker=ai-qwen-accept-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
 changed=no
+restore_policy() {
+    install -m 0640 -o root -g ai-models "$work/config.json" "$config.restore"
+    mv -fT "$config.restore" "$config"
+    changed=no
+}
 cleanup() {
     local result=$?
     if [[ $result != 0 && -f $work/qwen.jsonl ]]; then
@@ -16,8 +23,7 @@ cleanup() {
         echo 'Qwen acceptance failed; private diagnostic: /var/lib/ai-models/last-acceptance.log' >&2
     fi
     if [[ $changed == yes ]]; then
-        install -m 0640 -o root -g ai-models "$work/config.json" "$config.restore"
-        mv -fT "$config.restore" "$config"
+        restore_policy
     fi
     ai-sandbox shell "$project" rm -f -- "/tmp/$marker" >/dev/null 2>&1 || true
     rm -rf -- "$work"
@@ -48,6 +54,7 @@ for port in [22,8080]:
  raise AssertionError('Unexpected access to host port '+str(port))
 print('OK gateway access, denied model and host isolation')
 PY
+qwen_acceptance() {
 prompt="Run exactly this shell command: printf '%s' '$marker' > /tmp/$marker"$'\n'"Then reply DONE. Do not read other files."
 timeout 180 ai-sandbox shell "$project" bash -c \
     'cd /tmp; exec qwen --model "$1" -p "$2" --approval-mode yolo --output-format stream-json' \
@@ -70,6 +77,7 @@ for provider in json.loads(pathlib.Path(sys.argv[2]).read_text())['providers'].v
  assert pathlib.Path(provider['key_file']).read_text().strip() not in raw, 'Provider key leaked into Qwen output'
 print('OK Qwen called the shell tool inside the sandbox')
 PY
+}
 changed=yes
 python3 - "$config" "$project" <<'PY'
 import json,os,pathlib,sys
@@ -91,4 +99,8 @@ except urllib.error.HTTPError as error:
 else: raise AssertionError('Exhausted project quota was accepted')
 print('OK exhausted project quota')
 PY
+restore_policy
+printf 'OK model gateway API acceptance: %s\n' "$project"
+[[ ${3:-} != --api-only ]] || exit 0
+qwen_acceptance
 printf 'OK model gateway acceptance: %s\n' "$project"
