@@ -16,7 +16,7 @@ sandbox:
 # model_gateway:
 #   providers:
 #     modelstudio:
-#       base_url: https://YOUR-WORKSPACE.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+#       base_url: https://YOUR-WORKSPACE.eu-central-1.maas.aliyuncs.com/compatible-mode/v1
 #       key_file: /etc/ai-bootstrap/model-keys/modelstudio.key
 #   models:
 #     qwen3.8-flash: {provider: modelstudio, model: qwen3.8-flash}
