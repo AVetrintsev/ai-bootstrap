@@ -255,6 +255,18 @@ configure_sandbox() {
     publish "$release/lib/sandbox.sh" /usr/local/sbin/ai-sandbox 755
     publish "$release/lib/ai-bootstrap-sandbox.service" /etc/systemd/user/ai-bootstrap-sandbox.service 644
     publish "$work/sandbox-settings" "$etc/sandbox-settings" 600
+    publish "$work/sandbox-resources" "$etc/sandbox-resources" 600
+    publish "$release/lib/sandbox-resources.sh" "$libexec/sandbox-resources.sh" 755
+    publish "$release/lib/ai-sandboxes.slice" /etc/systemd/system/ai-sandboxes.slice 644
+    publish "$release/lib/ai-bootstrap-sandbox-resources.service" /etc/systemd/system/ai-bootstrap-sandbox-resources.service 644
+    systemctl daemon-reload
+    systemctl enable ai-bootstrap-sandbox-resources.service
+    systemctl restart ai-bootstrap-sandbox-resources.service
+    local account uid
+    while IFS=: read -r account _ uid _; do
+        [[ $account == aisbx-* && $uid -ge 60001 && $uid -le 60999 ]] || continue
+        /usr/local/sbin/ai-sandbox resources "${account#aisbx-}"
+    done < <(getent passwd)
 }
 
 configure_model_gateway() {
@@ -270,15 +282,6 @@ configure_model_gateway() {
     if [[ $(cat "$work/model-gateway.json") == null ]]; then
         quiet 'could not stop model gateway' systemctl disable --now ai-bootstrap-models.service
         rm -f -- "$etc/model-gateway.json"
-        local account uid
-        while IFS=: read -r account _ uid _; do
-            [[ $account == aisbx-* && $uid -ge 60001 && $uid -le 60999 ]] || continue
-            if [[ -f /etc/systemd/system/user-$uid.slice.d/95-qwen.conf ]]; then
-                rm -f -- "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf"
-                systemctl daemon-reload
-                systemctl set-property --runtime "user-$uid.slice" MemoryMax=384M
-            fi
-        done < <(getent passwd)
         skip_reason='model_gateway is not configured'
         return
     fi

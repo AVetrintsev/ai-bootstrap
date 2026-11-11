@@ -156,7 +156,14 @@ def stage(config_path, work):
     profile = mapping(config.get("mihomo"), "mihomo").get("profile")
     validate_profile(profile)
     sandbox_enabled = "sandbox" in config
-    internal_tcp = sandbox_internal_tcp(mapping(config.get("sandbox", {}), "sandbox"))
+    sandbox = mapping(config.get("sandbox", {}), "sandbox")
+    internal_tcp = sandbox_internal_tcp(sandbox)
+    resources = []
+    for field in ("memory_percent", "cpu_percent"):
+        value = sandbox.get(field, 80)
+        if type(value) is not int or not 1 <= value <= 100:
+            raise ValueError(f"sandbox.{field} must be an integer from 1 to 100")
+        resources.append(value)
     gateway = config.get("model_gateway")
     if gateway is not None:
         if not sandbox_enabled:
@@ -187,6 +194,7 @@ def stage(config_path, work):
     (work / "sandbox-settings").write_text(
         f"{enabled} {SANDBOX_UID_MIN} {SANDBOX_UID_MAX}\n", encoding="utf-8"
     )
+    (work / "sandbox-resources").write_text(" ".join(map(str, resources)) + "\n", encoding="utf-8")
 
 
 def check_ssh(work):

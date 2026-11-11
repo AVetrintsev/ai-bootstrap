@@ -50,6 +50,31 @@ publish_unit() {
     fi
 }
 
+configure_resources() {
+    local slice=ai-sandboxes-$uid.slice group
+    install -d -m 0755 "/etc/systemd/system/user@$uid.service.d"
+    publish_unit "/etc/systemd/system/$slice" <<'EOF'
+[Slice]
+TasksMax=256
+EOF
+    publish_unit "/etc/systemd/system/user@$uid.service.d/95-sandbox-resources.conf" <<EOF
+[Unit]
+Requires=ai-bootstrap-sandbox-resources.service
+After=ai-bootstrap-sandbox-resources.service
+[Service]
+Slice=$slice
+EOF
+    rm -f -- "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf" \
+        "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf"
+    systemctl daemon-reload
+    systemctl start ai-bootstrap-sandbox-resources.service
+    group=$(systemctl show "user@$uid.service" --property=ControlGroup --value)
+    if systemctl is-active --quiet "user@$uid.service" && [[ $group != /ai.slice/ai-sandboxes.slice/$slice/* ]]; then
+        # Reparent the user manager once; persistent container storage stays in place.
+        systemctl restart "user@$uid.service"
+    fi
+}
+
 setup_disk() {
     local image=$project_dir/disk.ext4 mount_unit socket_requires=
     install -d -m 0711 "$project_dir"
@@ -70,7 +95,7 @@ Where=$disk
 Type=ext4
 Options=loop,nodev,nosuid
 EOF
-    install -d -m 0755 "/etc/systemd/system/user@$uid.service.d" "/etc/systemd/system/user-$uid.slice.d"
+    install -d -m 0755 "/etc/systemd/system/user@$uid.service.d"
     if [[ ${#github_mounts[@]} != 0 ]]; then
         socket_requires=$'Requires='"$github_socket"$'\nAfter='"$github_socket"
     fi
@@ -81,13 +106,6 @@ After=ai-bootstrap-firewall.service
 RequiresMountsFor=$disk
 $socket_requires
 EOF
-    publish_unit "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf" <<'EOF'
-[Slice]
-CPUQuota=100%
-MemoryMax=384M
-MemorySwapMax=0
-TasksMax=256
-EOF
     systemctl daemon-reload
     systemctl start "$mount_unit"
     if [[ ! -e $home ]]; then
@@ -95,6 +113,7 @@ EOF
     fi
     [[ -d $home && ! -L $home && $(stat -c '%u:%g:%a' "$home") == "$uid:$gid:700" ]] ||
         die 'incompatible project home'
+    configure_resources
 }
 
 base_archive() {
@@ -131,13 +150,6 @@ configure_qwen() {
     [[ -f /etc/ai-bootstrap/model-gateway.json ]] || return 0
     local gateway_host client
     gateway_host=$(gateway_address) || die 'could not determine the model gateway address'
-    install -d -m 0755 "/etc/systemd/system/user-$uid.slice.d"
-    publish_unit "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf" <<'EOF'
-[Slice]
-MemoryMax=768M
-EOF
-    systemctl daemon-reload
-    systemctl set-property --runtime "user-$uid.slice" MemoryMax=768M
     # The installed release pins Qwen; all package changes remain inside this container.
     source /etc/ai-bootstrap/sandbox-release.env
     as_project podman exec --interactive project /bin/bash -s -- "$QWEN_CODE_VERSION" \
@@ -263,7 +275,7 @@ github_delete() {
     fi
     project_account
     loginctl disable-linger "$user"
-    systemctl stop "user@$uid.service" "user-$uid.slice" "$github_socket"
+    systemctl stop "user@$uid.service" "ai-sandboxes-$uid.slice" "user-$uid.slice" "$github_socket"
     mount_unit=$(systemd-escape --path --suffix=mount "$disk")
     if [[ -e /etc/systemd/system/$mount_unit ]]; then
         systemctl stop "$mount_unit"
@@ -273,7 +285,9 @@ github_delete() {
         "/etc/systemd/system/$mount_unit" \
         "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" \
         "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf"
-    rm -f -- "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf"
+    rm -f -- "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf" \
+        "/etc/systemd/system/user@$uid.service.d/95-sandbox-resources.conf" \
+        "/etc/systemd/system/ai-sandboxes-$uid.slice"
     systemctl daemon-reload
     userdel "$user"
 }
@@ -285,6 +299,11 @@ case $action in
         ;;
     github-create) github_create "$@" ;;
     github-delete) github_delete "$@" ;;
+    resources)
+        [[ $# == 0 ]] || die 'resources expects one project name'
+        project_account
+        configure_resources
+        ;;
     qwen-setup)
         [[ $# == 0 ]] || die 'qwen-setup expects one project name'
         project_account

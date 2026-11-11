@@ -9,6 +9,12 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class ConfigTests(unittest.TestCase):
+    def test_sandbox_pool_defaults_to_eighty_percent_of_vm_memory_and_cpu(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        result, resources = self.stage(example, artifact="sandbox-resources")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(resources, "80 80\n")
+
     def test_all_ipv4_ssh_access_requires_explicit_setting(self):
         example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
         config = "ssh:\n  allow_from_any_ipv4: true\n" + example[example.index("portal:"):]

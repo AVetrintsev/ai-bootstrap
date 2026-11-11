@@ -1,0 +1,7 @@
+[Unit]
+Description=Shared CPU and memory pool for AI project sandboxes
+
+[Slice]
+CPUAccounting=yes
+MemoryAccounting=yes
+MemorySwapMax=0
