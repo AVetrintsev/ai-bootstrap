@@ -78,6 +78,8 @@ try:
           'assert p.stat().st_size>100; assert p.read_bytes()[:5]==b"REDIS"')
     shell('python3', '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])',
           fixture, f'export function {symbol}_changed() {{ return 43; }}\n')
+    # Let Podman finish shutdown before stopping the user manager and its scopes.
+    project_run('systemctl', '--user', 'stop', 'ai-bootstrap-sandbox.service', timeout=130)
     run('systemctl', 'restart', f'user@{account.pw_uid}.service', timeout=180)
     ready()
     assert project_run('podman', 'inspect', '--format', '{{.Id}}', 'project') == identity
