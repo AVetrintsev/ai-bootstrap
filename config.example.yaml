@@ -12,14 +12,14 @@ sandbox:
   internal_tcp: []
   # Здесь можно перечислить доверенные службы во внутренних сетях, например "10.2.3.4:8443".
 
-# Включите после сохранения ключа на хосте командой sudo ai-model-key modelstudio.
+# Включите после сохранения ключа на хосте командой sudo ai-model-key openrouter.
 # model_gateway:
 #   providers:
-#     modelstudio:
-#       base_url: https://YOUR-WORKSPACE.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
-#       key_file: /etc/ai-bootstrap/model-keys/modelstudio.key
+#     openrouter:
+#       base_url: https://openrouter.ai/api/v1
+#       key_file: /etc/ai-bootstrap/model-keys/openrouter.key
 #   models:
-#     qwen3.8-flash: {provider: modelstudio, model: qwen3.8-flash}
+#     qwen3.8-flash: {provider: openrouter, model: qwen/qwen3.8-flash}
 #   defaults:
 #     models: [qwen3.8-flash]
 #     requests_per_day: 100
