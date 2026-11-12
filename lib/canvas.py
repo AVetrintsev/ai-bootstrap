@@ -37,12 +37,18 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
     async def open_project(request):
         project = request.match_info["project"]
         config = connection(project)
+        projects = await asyncio.to_thread(github_request, "projects")
+        selected = next((item for item in projects.get("projects", []) if item["sandbox"] == project), None)
+        if not selected or selected["state"] != "ready" or selected.get("canvas") != "ready":
+            raise web.HTTPServiceUnavailable(text="Вернитесь к проектам и дождитесь подключения Canvas.")
         try:
             async with ClientSession(connector=UnixConnector(path=str(socket_dir / f"{project}.sock")),
                                      timeout=ClientTimeout(total=15)) as client:
-                async with client.get("http://localhost/api/settings", headers={"X-Session-API-Key": config["key"]}) as ready:
-                    if ready.status != 200:
-                        raise OSError("Agent Server is not ready")
+                for path in ("/server_info", "/api/settings", "/api/conversations/" + config["conversation_id"]):
+                    async with client.get("http://localhost" + path, headers={"X-Session-API-Key": config["key"]}) as ready:
+                        if ready.status != 200:
+                            raise OSError("Agent Server is not ready")
+                        await ready.read()
         except (ClientError, OSError):
             await asyncio.to_thread(github_request, "canvas-failed", repository=int(project[3:]))
             return web.Response(status=503, content_type="text/html", text=
@@ -50,15 +56,16 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
                 '<p><a href="/projects">К проектам — повторить подключение</a></p></html>')
         # Canvas 1.39.0 registry format and URL selection are pinned together.
         # The real Agent Server key stays on the platform; the authenticated proxy supplies it.
-        value = json.dumps(project)
-        script = """const id=PROJECT;
-const entry={id,name:id,host:location.origin+'/agent/'+id,apiKey:'portal-session',kind:'local'};
+        value = json.dumps({"id": project, "name": selected["name"], "conversation": config["conversation_id"]}).replace("<", "\\u003c")
+        script = """const project=PROJECT,id=project.id;
+const entry={id,name:project.name,host:location.origin+'/agent/'+id,apiKey:'portal-session',kind:'local'};
 let entries=[];
 try { entries=JSON.parse(localStorage.getItem('openhands-backends')||'[]'); } catch {}
 if (!Array.isArray(entries)) entries=[];
 localStorage.setItem('openhands-backends',JSON.stringify([...entries.filter(x=>x.id!==id),entry]));
 sessionStorage.setItem('openhands-active-backend',JSON.stringify({backendId:id,orgId:null}));
-location.replace('/conversations?backend='+encodeURIComponent(id));""".replace("PROJECT", value)
+localStorage.setItem('openhands-onboarded','1');
+location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?backend='+encodeURIComponent(id));""".replace("PROJECT", value)
         return web.Response(content_type="text/html", text=
             '<!doctype html><html lang="ru"><meta charset="utf-8"><title>Открытие проекта</title>'
             '<p>Открываем Canvas…</p><script>' + script + '</script></html>')
@@ -92,7 +99,7 @@ location.replace('/conversations?backend='+encodeURIComponent(id));""".replace("
         project = request.match_info["project"]
         config = connection(project)
         path = request.match_info["path"]
-        if not (path.startswith("api/") or path.startswith("sockets/") or path in ("sockets", "alive", "ready", "health")):
+        if not (path.startswith("api/") or path.startswith("sockets/") or path in ("sockets", "alive", "ready", "health", "server_info")):
             raise web.HTTPNotFound()
         headers = {key: value for key, value in request.headers.items() if key.lower() in SAFE_HEADERS}
         headers["X-Session-API-Key"] = config["key"]

@@ -52,12 +52,30 @@ else:
     sys.exit("Agent Server did not become ready")
 
 marker = config.with_name("canvas-configured")
-if not marker.exists():
+if not marker.exists() or marker.read_text().strip() != "2":
     # The Qwen launcher supplies only this project's model-gateway key.
+    model = json.loads(config.with_name("model-gateway.json").read_text())["model"]
     request("/api/settings", "PATCH", {
         "agent_settings_diff": {"agent_kind": "acp", "acp_server": "custom", "acp_command": ["/usr/local/bin/qwen"],
-                                "acp_args": ["--acp"], "acp_model": json.loads(config.with_name("model-gateway.json").read_text())["model"]},
+                                "acp_args": ["--acp"], "acp_model": model},
         "misc_settings_diff": {"app_preferences": {"language": "ru", "user_consents_to_analytics": False}},
     })
-    marker.write_text("1\n")
+    request("/api/agent-profiles/qwen-code", "POST", {
+        "agent_kind": "acp", "acp_server": "custom", "acp_command": "/usr/local/bin/qwen",
+        "acp_args": ["--acp"], "acp_model": model,
+    })
+    profile = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "qwen-code")
+    request("/api/agent-profiles/" + profile["id"] + "/activate", "POST")
+    marker.write_text("2\n")
+try:
+    request("/api/conversations/" + settings["conversation_id"])
+except urllib.error.HTTPError as error:
+    if error.code != 404:
+        raise
+    active = request("/api/agent-profiles")["active_agent_profile_id"]
+    request("/api/conversations", "POST", {
+        "conversation_id": settings["conversation_id"], "agent_profile_id": active,
+        "workspace": {"kind": "LocalWorkspace", "working_dir": "/workspace/repo"},
+        "worktree": False, "autotitle": False,
+    })
 print("OK Agent Server and Qwen ACP profile")

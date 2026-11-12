@@ -297,12 +297,14 @@ configure_canvas() {
     as_project podman exec --interactive project bash -s -- "$AGENT_SERVER_VERSION" \
         < /usr/local/libexec/ai-bootstrap/canvas-setup.sh
     python3 -I - "$project" <<'PY'
-import grp,json,os,pathlib,secrets,sys
+import grp,json,os,pathlib,secrets,sys,uuid
 path=pathlib.Path('/var/lib/ai-canvas/connections')/(sys.argv[1]+'.json')
-if not path.exists():
-    path.write_text(json.dumps({'key':secrets.token_urlsafe(32)}))
-    path.chmod(0o640)
-    os.chown(path,0,grp.getgrnam('ai-portal').gr_gid)
+settings=json.loads(path.read_text()) if path.exists() else {'key':secrets.token_urlsafe(32)}
+if 'conversation_id' not in settings:
+    settings['conversation_id']=str(uuid.uuid4())
+    path.write_text(json.dumps(settings))
+path.chmod(0o640)
+os.chown(path,0,grp.getgrnam('ai-portal').gr_gid)
 PY
     as_project podman exec project install -d -m 0700 /opt/ai-canvas-control /root/.config/ai-bootstrap
     as_project podman cp /usr/local/libexec/ai-bootstrap/canvas-agent.py project:/opt/ai-canvas-control/agent.py
