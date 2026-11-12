@@ -250,7 +250,8 @@ class ProjectSession:
         args = {'cwd': '/workspace/repo', 'approvalPolicy': 'never', 'sandbox': 'danger-full-access'}
         if resume:
             args['threadId'] = identifier
-        result = await self.server.call('thread/resume' if resume else 'thread/start', args)
+        # Required project MCP servers must finish starting before the first turn.
+        result = await self.server.call('thread/resume' if resume else 'thread/start', args, timeout=150)
         self.session = result['thread']['id']
         self.model = result['model']
         allowed = home / 'sessions-allowed'

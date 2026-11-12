@@ -4,7 +4,19 @@ from pathlib import Path
 
 from codegraphcontext.core.watcher import CodeWatcher
 from codegraphcontext.core.database_falkordb import FalkorDBManager
+from codegraphcontext.tools.graph_builder import GraphBuilder
 import codegraphcontext.server as cgc_server
+
+
+class ProjectGraphBuilder(GraphBuilder):
+    def delete_file_from_graph(self, path):
+        super().delete_file_from_graph(path)
+        # CGC 0.6.13's OPTIONAL MATCH delete can leave file-owned symbols in
+        # FalkorDB after deleting their File node. Their path is the ownership key.
+        with self.driver.session() as session:
+            session.run('MATCH (n {path: $path}) '
+                        'WHERE NOT n:Module AND NOT n:DbTable AND NOT n:ExternalClass '
+                        'DETACH DELETE n', path=str(Path(path).resolve()))
 
 
 class ProjectWatcher(CodeWatcher):
@@ -25,6 +37,7 @@ async def main():
     # Pin the factory before construction: CGC's automatic fallback can open
     # graph.rdb with another database format, preventing a later retry.
     cgc_server.get_database_manager = FalkorDBManager
+    cgc_server.GraphBuilder = ProjectGraphBuilder
     server = cgc_server.MCPServer(loop=asyncio.get_running_loop(), cwd=Path('/workspace/repo'))
     server.code_watcher = ProjectWatcher(server.graph_builder, server.job_manager)
     await server.run()
