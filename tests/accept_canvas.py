@@ -34,7 +34,7 @@ test_conversation = None
 context = None
 with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
-               (token_hash, now + 600, "Canvas acceptance", now, now))
+               (token_hash, now + 1800, "Canvas acceptance", now, now))
 try:
     if tool == 'project-tools':
         subprocess.run(['ai-sandbox', 'shell', project, 'python3', '-c',
