@@ -32,11 +32,12 @@ def client():
 
 class Graph:
     def __init__(self):
-        environment = dict(os.environ, DEFAULT_DATABASE='ladybugdb',
-            LADYBUGDB_PATH='/root/.local/share/ai-codegraph/graph.lbug',
+        environment = dict(os.environ,
             CGC_EMBEDDED_BUFFER_POOL_MB='128', PARALLEL_WORKERS='2',
-            CGC_IGNORE_PROJECT_ENV='1', CGC_ALLOWED_ROOTS='/workspace/repo')
-        self.process = subprocess.Popen(['/opt/ai-codegraph/bin/cgc', 'mcp', 'start'],
+            CGC_IGNORE_PROJECT_ENV='1', CGC_ALLOWED_ROOTS='/workspace/repo',
+            CGC_OUTPUT_FORMAT='json', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='2')
+        self.process = subprocess.Popen(['/opt/ai-codegraph/bin/cgc', '--database', 'ladybugdb',
+            '--db-path', '/root/.local/share/ai-codegraph/graph.lbug', 'mcp', 'start'],
             cwd='/workspace/repo', env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             bufsize=0)
         self.lock = threading.Lock()
@@ -46,7 +47,7 @@ class Graph:
         with self.lock:
             self.sequence += 1
             identity = self.sequence
-            self.process.stdin.write((json.dumps(dict(message, id=identity)) + '\n').encode())
+            self.process.stdin.write((json.dumps(dict(message, jsonrpc='2.0', id=identity)) + '\n').encode())
             deadline = time.monotonic() + 180
             # Unbuffered byte reads avoid hiding a second line behind select().
             line = bytearray()
@@ -82,24 +83,30 @@ class Graph:
     def prepare(self):
         self.request({'method': 'initialize', 'params': {'protocolVersion': '2025-03-26',
             'capabilities': {}, 'clientInfo': {'name': 'ai-bootstrap', 'version': '1'}}})
-        job = self.tool('add_code_to_graph', {'path': '/workspace/repo'})
+        # CGC synchronizes existing repositories here and starts an index job for new ones.
+        job = self.tool('watch_directory', {'path': '/workspace/repo'})
         deadline = time.monotonic() + 600
         while job.get('job_id'):
-            status = self.tool('check_job_status', {'job_id': job['job_id']})
+            result = self.tool('check_job_status', {'job_id': job['job_id']})
+            status = result.get('job', result)
             if status.get('status') == 'completed':
                 break
             if status.get('status') in ('failed', 'cancelled', 'not_found') or time.monotonic() >= deadline:
                 raise RuntimeError(f'Initial graph index failed: {status}')
             time.sleep(1)
-        self.tool('watch_directory', {'path': '/workspace/repo'})
 
     def close(self):
-        self.process.terminate()
+        # EOF runs CGC's own watcher shutdown and database checkpoint.
+        self.process.stdin.close()
         try:
-            self.process.wait(timeout=10)
+            self.process.wait(timeout=20)
         except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait()
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
 
 
 def serve():

@@ -21,7 +21,8 @@ for package in "serena:serena-agent:$serena_version" "codegraph:codegraphcontext
     IFS=: read -r name distribution version <<< "$package"
     installed=$("/opt/ai-$name/bin/python" -c 'import importlib.metadata as m,sys; print(m.version(sys.argv[1]))' "$distribution" 2>/dev/null || true)
     if [[ $installed != "$version" ]]; then
-        "/opt/ai-$name/bin/pip" install --no-cache-dir --disable-pip-version-check "$distribution==$version"
+        "/opt/ai-$name/bin/pip" install --no-cache-dir --disable-pip-version-check \
+            --timeout 60 --retries 5 --resume-retries 5 "$distribution==$version"
     fi
 done
 install -d -m 0700 /root/.qwen /root/.local/share/ai-codegraph /opt/ai-project-tools

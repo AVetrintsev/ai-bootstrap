@@ -290,6 +290,7 @@ configure_tools() {
     as_project podman exec --interactive project bash -s -- "$RIPGREP_VERSION" "$AST_GREP_VERSION" \
         "$SERENA_VERSION" "$CODEGRAPHCONTEXT_VERSION" < /usr/local/libexec/ai-bootstrap/project-tools-setup.sh
     generation=$(sha256sum /usr/local/libexec/ai-bootstrap/project-graph.py \
+        /usr/local/libexec/ai-bootstrap/project-tools-exec /etc/systemd/user/ai-bootstrap-project-tools.service \
         /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
     previous=$(as_project podman exec project cat /opt/ai-project-tools/generation 2>/dev/null || true)
     as_project podman cp /usr/local/libexec/ai-bootstrap/project-graph.py project:/opt/ai-project-tools/graph.py
@@ -300,7 +301,7 @@ configure_tools() {
     else
         as_project systemctl --user start ai-bootstrap-project-tools.service
     fi
-    for attempt in {1..180}; do
+    for attempt in {1..400}; do
         if as_project podman exec project python3 -I /opt/ai-project-tools/graph.py ready >/dev/null 2>&1; then
             printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-project-tools/generation'
             return
@@ -355,7 +356,8 @@ configure_canvas() {
     configure_codex
     source /etc/ai-bootstrap/sandbox-release.env
     local generation previous
-    generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py | cut -d ' ' -f 1)"
+    generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py \
+        /usr/local/libexec/ai-bootstrap/project-tools-setup.sh | sha256sum | cut -d ' ' -f 1)"
     previous=$(as_project podman exec project cat /opt/ai-canvas-control/generation 2>/dev/null || true)
     as_project podman exec project test -d /workspace/repo/.git
     as_project podman exec --interactive project bash -s -- "$AGENT_SERVER_VERSION" \

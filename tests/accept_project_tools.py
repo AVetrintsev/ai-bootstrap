@@ -1,5 +1,6 @@
 """Exercise installed project tools on the target VM through their public interfaces."""
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -17,3 +18,7 @@ if __name__ == '__main__':
     assert 'ripgrep' in run(project, 'rg', '--version')
     assert 'ast-grep' in run(project, 'ast-grep', '--version')
     print('OK project search commands are installed')
+    probe = Path(__file__).with_name('project_tools_probe.py').read_text()
+    result = subprocess.run(['ai-sandbox', 'shell', project, 'python3', '-I', '-'],
+                            input=probe, text=True, timeout=300)
+    result.check_returncode()

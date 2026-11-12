@@ -1,5 +1,6 @@
 """Run on the target VM as root; creates and removes a temporary browser session."""
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -11,13 +12,13 @@ import time
 from playwright.sync_api import sync_playwright
 
 if os.geteuid() != 0 or len(sys.argv) not in (3, 4, 5):
-    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex] [shell|mcp]")
+    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex] [shell|mcp|project-tools]")
 project, chromium = sys.argv[1:3]
 agent = sys.argv[3] if len(sys.argv) >= 4 else 'qwen'
 tool = sys.argv[4] if len(sys.argv) == 5 else 'shell'
 if agent not in ('qwen', 'codex'):
     sys.exit('Expected qwen or codex')
-if tool not in ('shell', 'mcp') or (tool == 'mcp' and agent != 'codex'):
+if tool not in ('shell', 'mcp', 'project-tools') or (tool == 'mcp' and agent != 'codex'):
     sys.exit('MCP acceptance requires Codex and its temporary probe fixture')
 session = secrets.token_urlsafe(32)
 token_hash = hashlib.sha256(session.encode()).digest()
@@ -25,11 +26,18 @@ database = "/var/lib/ai-portal/portal.sqlite3"
 now = int(time.time())
 marker = "ai-canvas-accept-" + secrets.token_hex(8)
 marker_path = "/workspace/repo/." + marker
+fixture_symbol = 'canvas_tools_' + secrets.token_hex(8)
+fixture_path = '/workspace/repo/' + fixture_symbol + '.py'
 executor_stopped = False
 with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
                (token_hash, now + 600, "Canvas acceptance", now, now))
 try:
+    if tool == 'project-tools':
+        subprocess.run(['ai-sandbox', 'shell', project, 'python3', '-c',
+            'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', fixture_path,
+            f'def {fixture_symbol}():\n    return 42\n'], check=True, stdin=subprocess.DEVNULL)
+        time.sleep(5)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=chromium, headless=True, args=["--no-sandbox"])
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
@@ -57,7 +65,18 @@ try:
                   "Do not read or change any other files. Then reply DONE.")
         if tool == 'mcp':
             prompt = f'Call the MCP acceptance probe tool with file="{marker_path}" and text="{marker}". Use only that MCP tool, not shell. Then reply DONE.'
+        if tool == 'project-tools':
+            prompt = (f'Acceptance test. Use Serena get_symbols_overview on {fixture_symbol}.py, then '
+                      f'CodeGraphContext find_code with query {fixture_symbol}. Both must find the function. '
+                      f'Then use the shell tool to run: cd /workspace/repo && rg {fixture_symbol} {fixture_symbol}.py '
+                      f"&& ast-grep run --lang python --pattern 'def $NAME(): $$$BODY' {fixture_symbol}.py "
+                      f"&& printf '%s' '{marker}' > '{marker_path}'. Do not change other files. Reply DONE.")
         def has_tool(transcript):
+            if tool == 'project-tools':
+                # Tool names must arrive in live events, not only in the user's prompt.
+                events = '\n'.join(frame.decode() if isinstance(frame, bytes) else frame for frame in frames)
+                return ('get_symbols_overview' in events and 'find_code' in events and
+                        ('tool_call' in events or 'ToolEvent' in events))
             return (any(line.strip() == 'probe' for line in transcript.splitlines()) if tool == 'mcp' else
                     any(marker in line and ('Running Shell:' in line or '/bin/bash' in line) for line in transcript.splitlines()))
         page.get_by_test_id("chat-input").fill(prompt)
@@ -124,5 +143,8 @@ finally:
         subprocess.run(['systemctl', 'start', f'ai-bootstrap-codex-executor@{project}.socket'], check=True)
     subprocess.run(["ai-sandbox", "shell", project, "rm", "-f", "--", marker_path, marker_path + '-blocked'],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if tool == 'project-tools':
+        subprocess.run(['ai-sandbox', 'shell', project, 'rm', '-f', '--', fixture_path],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with sqlite3.connect(database) as db:
         db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
