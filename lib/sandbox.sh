@@ -70,7 +70,7 @@ configure_resources() {
     install -d -m 0755 "/etc/systemd/system/user@$uid.service.d"
     publish_unit "/etc/systemd/system/$slice" <<'EOF'
 [Slice]
-TasksMax=256
+TasksMax=512
 EOF
     publish_unit "/etc/systemd/system/user@$uid.service.d/95-sandbox-resources.conf" <<EOF
 [Unit]

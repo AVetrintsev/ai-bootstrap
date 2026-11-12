@@ -24,7 +24,7 @@ for project in sys.argv[1:]:
  child=pool/f'ai-sandboxes-{uid}.slice'
  assert (child/'memory.max').read_text().strip()=='max'
  assert (child/'cpu.max').read_text().split()[0]=='max'
- assert (child/'pids.max').read_text().strip()=='256'
+ assert (child/'pids.max').read_text().strip()=='512'
  print('OK shared resource membership:',project)
 print(f'OK shared pool: {memory_percent}% VM RAM, {cpu_percent}% of all {os.cpu_count()} vCPUs')
 PY

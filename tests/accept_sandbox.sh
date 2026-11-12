@@ -83,7 +83,7 @@ check_isolation() {
         read -r quota period < "$slice/cpu.max"
         [[ $quota == max ]]
         [[ $(<"$slice/memory.max") == max ]]
-        [[ $(<"$slice/pids.max") == 256 ]]
+        [[ $(<"$slice/pids.max") == 512 ]]
         for path in /var/lib/ai-sandboxes /home/owner/.ssh /root/.ssh /etc/ai-bootstrap \
             /run/podman/podman.sock "/run/user/$uid/podman/podman.sock"; do
             deny ai-sandbox shell "$project" test -e "$path"
