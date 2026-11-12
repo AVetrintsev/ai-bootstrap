@@ -1,0 +1,19 @@
+[Unit]
+Description=Authenticated Canvas and Agent Server proxy
+Requires=ai-bootstrap-canvas.socket
+After=ai-bootstrap-canvas.socket
+
+[Service]
+User=ai-portal
+Group=ai-portal
+ExecStart=/usr/bin/python3 /usr/local/libexec/ai-bootstrap/canvas.py
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ai-portal
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+StandardOutput=null
+StandardError=null

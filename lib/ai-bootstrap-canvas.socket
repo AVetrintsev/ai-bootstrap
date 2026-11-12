@@ -1,0 +1,8 @@
+[Socket]
+ListenStream=/run/ai-bootstrap-canvas.sock
+SocketUser=ai-portal
+SocketGroup=www-data
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target
