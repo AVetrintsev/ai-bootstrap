@@ -20,12 +20,17 @@ for line in sys.stdin:
     scenario=json.loads((home/'scenario.json').read_text())
     method=req['method']
     result={}
+    if method=='environment/info' and not scenario.get('executor',True):
+        print(json.dumps({'id':req['id'],'error':{'code':-32603,'message':'Transport closed'}}),flush=True)
+        continue
     if method=='account/read':
         result={'account': None if scenario['status']=='login_required' else {'type':'chatgpt','email':'private@example.test'}}
     elif method=='account/rateLimits/read':
         result={'ordinaryUsageAllowed':scenario['status']!='limit_reached','rateLimits':{}}
     elif method=='account/login/start':
         result={'type':'chatgptDeviceCode','loginId':'private-login','userCode':'TEST-CODE','verificationUrl':'https://auth.openai.com/codex/device'}
+    elif method=='thread/start':
+        result={'thread':{'id':'fixture-thread'},'model':'fixture-model'}
     print(json.dumps({'id':req['id'],'result':result}),flush=True)
 '''
 
@@ -99,6 +104,40 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
         self.binary.write_text(FAKE_CODEX)
         self.binary.chmod(0o700)
         self.assertEqual((await self.request('status'))['status'], 'login_required')
+
+    async def test_executor_failure_and_profile_change_complete_the_turn_instead_of_leaving_it_pending(self):
+        home = self.state / 'projects/gh-123/chatgpt'
+        home.mkdir(parents=True)
+        scenario = home / 'scenario.json'
+        scenario.write_text('{"status":"ready","executor":true}')
+        path = self.state / 'project.sock'
+        await self.start(path, 'gh-123')
+        reader, writer = await asyncio.open_unix_connection(str(path))
+        try:
+            writer.write(b'{"id":1,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[]}}\n')
+            await writer.drain()
+            created = json.loads(await asyncio.wait_for(reader.readline(), 3))
+            self.assertEqual(created['result']['sessionId'], 'fixture-thread')
+            scenario.write_text('{"status":"ready","executor":false}')
+            writer.write(b'{"id":2,"method":"session/prompt","params":{"sessionId":"fixture-thread","prompt":[{"type":"text","text":"write a file"}]}}\n')
+            await writer.drain()
+            message = json.loads(await asyncio.wait_for(reader.readline(), 3))
+            self.assertIn('Исполнитель проекта недоступен', message['params']['update']['content']['text'])
+            response = json.loads(await asyncio.wait_for(reader.readline(), 3))
+            self.assertEqual(response['result']['stopReason'], 'refusal')
+            self.assertEqual(response['result']['_meta']['ai-bootstrap/error'], 'executor_unavailable')
+            scenario.write_text('{"status":"ready","executor":true}')
+            (self.state / 'profile').write_text('api')
+            writer.write(b'{"id":3,"method":"session/prompt","params":{"sessionId":"fixture-thread","prompt":[{"type":"text","text":"write a file"}]}}\n')
+            await writer.drain()
+            message = json.loads(await asyncio.wait_for(reader.readline(), 3))
+            self.assertIn('Способ оплаты изменён', message['params']['update']['content']['text'])
+            response = json.loads(await asyncio.wait_for(reader.readline(), 3))
+            self.assertEqual(response['result']['stopReason'], 'refusal')
+            self.assertEqual(response['result']['_meta']['ai-bootstrap/error'], 'profile_changed')
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     async def test_sandbox_protocol_cannot_change_auth_environment_or_host_configuration(self):
         path = self.state / 'project.sock'

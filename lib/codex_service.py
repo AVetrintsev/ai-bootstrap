@@ -22,6 +22,7 @@ MESSAGES = {
     'login_required': 'Требуется повторный вход в ChatGPT через портал /codex.',
     'limit_reached': 'Лимит подписки исчерпан. Дождитесь обновления лимита или явно выберите платный API в портале /codex.',
     'executor_unavailable': 'Исполнитель проекта недоступен. Выполнение остановлено.',
+    'profile_changed': 'Способ оплаты изменён. Создайте новый разговор.',
     'unavailable': 'Codex недоступен. Повторите попытку позже.',
 }
 
@@ -262,7 +263,7 @@ class ProjectSession:
         if not self.server or params.get('sessionId') != self.session:
             raise ValueError('Неизвестный разговор.')
         if selected_profile(self.state) != self.profile:
-            raise ValueError('Способ оплаты изменён. Создайте новый разговор.')
+            raise CodexError('profile_changed')
         parts = params.get('prompt', [])
         if not isinstance(parts, list) or not parts or any(not isinstance(p, dict) or p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in parts):
             raise ValueError('Поддерживаются текстовые сообщения.')
@@ -334,6 +335,14 @@ class ProjectSession:
             if method in ('session/new', 'session/load') and self.server and not self.session:
                 await self.server.close()
                 self.server = None
+            if method == 'session/prompt' and isinstance(error, (CodexError, OSError, asyncio.TimeoutError)):
+                # A completed refusal is terminal in ACP. A transport error leaves
+                # the Canvas user message pending and can replay it on restart.
+                await self.update({'sessionUpdate': 'agent_message_chunk',
+                                   'content': {'type': 'text', 'text': 'Ошибка: ' + MESSAGES[kind]}})
+                if key is not None:
+                    await self.send({'id': key, 'result': {'stopReason': 'refusal', '_meta': {'ai-bootstrap/error': kind}}})
+                return
             if key is not None:
                 await self.send({'id': key, 'error': {'code': -32000, 'message': str(error) if isinstance(error, (CodexError, ValueError)) else MESSAGES[kind], 'data': {'kind': kind}}})
 

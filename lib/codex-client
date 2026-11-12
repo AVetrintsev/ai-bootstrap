@@ -41,6 +41,9 @@ def main():
                     if message.get('id') == sequence:
                         if 'error' in message:
                             sys.exit(message['error']['message'])
+                        if message['result'].get('stopReason') == 'refusal':
+                            print()
+                            sys.exit(1)
                         return message['result']
                     update = message.get('params', {}).get('update', {})
                     if update.get('sessionUpdate') == 'agent_message_chunk':
