@@ -54,14 +54,16 @@ try:
             result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
                                     capture_output=True, text=True)
             if result.returncode == 0 and result.stdout == marker:
-                break
+                transcript = page.locator("body").inner_text()
+                if any(line.startswith("Running Shell:") and marker in line for line in transcript.splitlines()):
+                    break
             approval = page.get_by_role("button", name=re.compile(r"^(Allow once|Approve|Allow|Разрешить)$", re.I))
             if approval.count() and approval.first.is_visible():
                 approval.first.click()
             page.wait_for_timeout(2000)
         else:
             print("Canvas failure:", page.locator("body").inner_text())
-            raise AssertionError("Qwen did not write the marker into the project checkout")
+            raise AssertionError("Qwen result was not confirmed in both the checkout and Canvas tool output")
         page.wait_for_timeout(2000)
         transcript = page.locator("body").inner_text()
         print("Canvas result:", transcript)
