@@ -1,5 +1,6 @@
 """Root-only target VM acceptance; uses native RPC, MCP and the sandbox client."""
 import asyncio
+import base64
 import json
 import os
 from pathlib import Path
@@ -82,6 +83,26 @@ async def check():
     socket_unit = 'ai-bootstrap-codex-executor@' + project + '.socket'
     service_unit = 'ai-bootstrap-codex-executor@' + project + '.service'
     try:
+        fs_reader, fs_writer = await asyncio.open_unix_connection('/run/ai-codex-exec/' + project + '.sock')
+        try:
+            async def fs_call(key, method, params):
+                fs_writer.write(json.dumps({'id': key, 'method': method, 'params': params}).encode() + b'\n')
+                await fs_writer.drain()
+                return json.loads(await asyncio.wait_for(fs_reader.readline(), 10))
+            initialized = await fs_call(1, 'initialize', {'clientName': 'ai-bootstrap-acceptance'})
+            assert 'result' in initialized, initialized
+            fs_writer.write(b'{"method":"initialized"}\n')
+            encoded = base64.b64encode(b'isolated-filesystem').decode()
+            written = await fs_call(2, 'fs/writeFile', {'path': 'file:///workspace/repo/.task10-fs', 'dataBase64': encoded})
+            assert 'result' in written, written
+            read = await fs_call(3, 'fs/readFile', {'path': 'file:///workspace/repo/.task10-fs'})
+            assert read['result']['dataBase64'] == encoded, read
+            denied = await fs_call(4, 'fs/readFile', {'path': 'file:///var/lib/ai-codex/auth/isolation-marker'})
+            assert 'error' in denied, denied
+            print('OK native file RPC reads and writes in the sandbox and cannot read the host auth directory')
+        finally:
+            fs_writer.close()
+            await fs_writer.wait_closed()
         run('ai-sandbox', 'shell', project, 'python3', '-c',
             'import sys;open(sys.argv[1],"w").write(sys.stdin.read())', probe_path, input=probe, text=True)
         process = await asyncio.create_subprocess_exec('runuser', '-u', 'ai-codex', '--',
@@ -133,7 +154,7 @@ async def check():
             process.terminate()
             await process.wait()
         run('systemctl', 'start', socket_unit)
-        run('ai-sandbox', 'shell', project, 'rm', '-f', probe_path, '/workspace/repo/.task10-mcp', '/workspace/repo/.task10-down')
+        run('ai-sandbox', 'shell', project, 'rm', '-f', probe_path, '/workspace/repo/.task10-mcp', '/workspace/repo/.task10-down', '/workspace/repo/.task10-fs')
         marker.unlink(missing_ok=True)
         shutil.rmtree(directory)
 

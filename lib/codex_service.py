@@ -156,11 +156,16 @@ class LoginControl:
         self.lock = asyncio.Lock()
 
     async def connect(self):
-        if not self.server or self.server.process.returncode is not None:
+        if not self.server or not self.server.process or self.server.process.returncode is not None:
             if self.server:
                 await self.server.close()
             self.server = AppServer(self.state / 'auth', binary=self.binary)
-            await self.server.start()
+            try:
+                await self.server.start()
+            except (CodexError, OSError):
+                await self.server.close()
+                self.server = None
+                raise
         while not self.server.events.empty():
             message = self.server.events.get_nowait()
             if message['method'] == 'account/login/completed':
@@ -230,6 +235,10 @@ class ProjectSession:
             raise ValueError('Требуется /workspace/repo без дополнительных MCP-серверов.')
         self.profile = selected_profile(self.state)
         home = self.state / 'projects' / self.project / self.profile
+        identifier = params.get('sessionId')
+        if resume and (not isinstance(identifier, str) or not re.fullmatch(r'[a-zA-Z0-9-]{1,100}', identifier)
+                       or not (home / 'sessions-allowed' / identifier).is_file()):
+            raise ValueError('Разговор не принадлежит этому проекту и способу оплаты.')
         key = self.api_key.read_text().strip() if self.profile == 'api' else None
         self.server = AppServer(home, binary=self.binary, api_key=key)
         await self.server.start()
@@ -239,9 +248,6 @@ class ProjectSession:
             raise CodexError('login_required')
         args = {'cwd': '/workspace/repo', 'approvalPolicy': 'never', 'sandbox': 'danger-full-access'}
         if resume:
-            identifier = params.get('sessionId', '')
-            if not re.fullmatch(r'[a-zA-Z0-9-]{1,100}', identifier) or not (home / 'sessions-allowed' / identifier).is_file():
-                raise ValueError('Разговор не принадлежит этому проекту и способу оплаты.')
             args['threadId'] = identifier
         result = await self.server.call('thread/resume' if resume else 'thread/start', args)
         self.session = result['thread']['id']
@@ -344,6 +350,17 @@ async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=A
         session = ProjectSession(project, writer, state=state, binary=binary, api_key=api_key) if project else None
         active = None
         try:
+            if slots.locked():
+                message = json.loads(await asyncio.wait_for(reader.readline(), 5))
+                if not isinstance(message, dict):
+                    return
+                reason = 'Слишком много открытых сеансов Codex. Закройте один из них и повторите попытку.'
+                if control:
+                    writer.write(json.dumps({'error': reason}).encode() + b'\n')
+                    await writer.drain()
+                else:
+                    await session.send({'id': message.get('id'), 'error': {'code': -32000, 'message': reason}})
+                return
             async with slots:
                 while line := await asyncio.wait_for(reader.readline(), 1800):
                     message = json.loads(line)

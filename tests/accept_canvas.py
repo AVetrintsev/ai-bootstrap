@@ -22,6 +22,7 @@ database = "/var/lib/ai-portal/portal.sqlite3"
 now = int(time.time())
 marker = "ai-canvas-accept-" + secrets.token_hex(8)
 marker_path = "/workspace/repo/." + marker
+executor_stopped = False
 with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
                (token_hash, now + 600, "Canvas acceptance", now, now))
@@ -77,9 +78,22 @@ try:
         screenshot = "/tmp/" + marker + ".png"
         page.screenshot(path=screenshot, full_page=True)
         print("Screenshot:", screenshot)
+        if agent == 'codex':
+            subprocess.run(['systemctl', 'stop', f'ai-bootstrap-codex-executor@{project}.socket',
+                            f'ai-bootstrap-codex-executor@{project}.service'], check=True)
+            executor_stopped = True
+            page.get_by_test_id('chat-input').fill(f'Write the word blocked to {marker_path}-blocked using the shell tool.')
+            page.get_by_test_id('chat-input').press('Enter')
+            page.get_by_text(re.compile('Исполнитель проекта недоступен')).first.wait_for(timeout=60000)
+            absent = subprocess.run(['ai-sandbox', 'shell', project, 'test', '!', '-e', marker_path + '-blocked'])
+            assert absent.returncode == 0
+            assert not os.path.exists(marker_path + '-blocked')
+            print('OK Canvas shows an explicit executor error without writing on the host or in the sandbox')
         browser.close()
 finally:
-    subprocess.run(["ai-sandbox", "shell", project, "rm", "-f", "--", marker_path],
+    if executor_stopped:
+        subprocess.run(['systemctl', 'start', f'ai-bootstrap-codex-executor@{project}.socket'], check=True)
+    subprocess.run(["ai-sandbox", "shell", project, "rm", "-f", "--", marker_path, marker_path + '-blocked'],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with sqlite3.connect(database) as db:
         db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))

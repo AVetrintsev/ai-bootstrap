@@ -295,7 +295,7 @@ configure_codex() {
     as_project podman exec project chmod 0755 /usr/local/bin/codex
     if [[ -f /var/lib/ai-codex/projects/$project/chatgpt/auth.lock &&
           ! -L /var/lib/ai-codex/projects/$project/chatgpt/auth.lock ]]; then
-        systemctl stop "ai-bootstrap-codex-project@$project.service"
+        systemctl stop "ai-bootstrap-codex-project@$project.socket" "ai-bootstrap-codex-project@$project.service"
     fi
     runuser -u ai-codex -- python3 -I /usr/local/libexec/ai-bootstrap/codex-project.py "$project"
     generation=$(sha256sum /usr/local/libexec/ai-bootstrap/codex_service.py \
@@ -413,6 +413,13 @@ case $action in
     github-create) github_create "$@" ;;
     github-delete) github_delete "$@" ;;
     canvas-setup) configure_canvas "$@" ;;
+    codex-setup)
+        [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
+        exec 9>/run/lock/ai-bootstrap-sandbox.lock
+        flock 9
+        project_account
+        configure_codex
+        ;;
     resources)
         [[ $# == 0 ]] || die 'resources expects one project name'
         project_account

@@ -92,6 +92,14 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request('status'))['profile'], 'chatgpt')
         self.assertIn('error', await self.request('account/login/start', apiKey='untrusted'))
 
+    async def test_control_recovers_when_codex_becomes_available_again(self):
+        self.binary.unlink()
+        self.assertIn('error', await self.request('status'))
+        self.assertIn('error', await self.request('status'))
+        self.binary.write_text(FAKE_CODEX)
+        self.binary.chmod(0o700)
+        self.assertEqual((await self.request('status'))['status'], 'login_required')
+
     async def test_sandbox_protocol_cannot_change_auth_environment_or_host_configuration(self):
         path = self.state / 'project.sock'
         await self.start(path, 'gh-123')
@@ -104,6 +112,8 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
                 ('session/new', {'cwd': '/workspace/repo', 'mcpServers': [{'command': 'sh'}]}),
                 ('session/new', ['invalid']), ('session/prompt', {'prompt': [None]}),
                 (['invalid-method'], {}),
+                ('session/load', {'cwd': '/workspace/repo', 'sessionId': None}),
+                ('session/load', {'cwd': '/workspace/repo', 'sessionId': {}}),
             ]
             for key, (method, params) in enumerate(requests):
                 writer.write(json.dumps({'id': key, 'method': method, 'params': params}).encode() + b'\n')

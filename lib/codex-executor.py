@@ -1,5 +1,6 @@
 """Trusted socket to an executor process in exactly one rootless project."""
 import asyncio
+from contextlib import suppress
 import os
 import pwd
 import re
@@ -42,11 +43,17 @@ async def main():
                 writer.close()
                 if child is not None and child.returncode is None:
                     child.stdin.close()
-                    try:
-                        await asyncio.wait_for(child.wait(), 5)
-                    except asyncio.TimeoutError:
-                        child.kill()
+                    async def drain_and_wait():
+                        while await child.stdout.read(65536):
+                            pass
                         await child.wait()
+                    try:
+                        await asyncio.wait_for(drain_and_wait(), 5)
+                    except asyncio.TimeoutError:
+                        with suppress(ProcessLookupError):
+                            child.kill()
+                        with suppress(asyncio.TimeoutError):
+                            await asyncio.wait_for(drain_and_wait(), 5)
 
     server = await asyncio.start_unix_server(connect, sock=socket.socket(fileno=3))
     async with server:
