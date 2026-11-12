@@ -31,6 +31,8 @@ def provision():
         command += ["github-create", sandbox, repository]
     elif action == "delete" and repository is None:
         command += ["github-delete", sandbox]
+    elif action == "canvas" and repository is None:
+        command += ["canvas-setup", sandbox]
     else:
         return {}
     result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, timeout=880)

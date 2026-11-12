@@ -62,8 +62,9 @@ class GitHubProjectsTest(unittest.TestCase):
 
     def wait_for(self, projects, expected):
         for _ in range(200):
-            snapshot = {row["id"]: row["state"] for row in projects.list()["projects"]}
-            if snapshot == expected:
+            rows = projects.list()["projects"]
+            snapshot = {row["id"]: row["state"] for row in rows}
+            if snapshot == expected and all(row.get("canvas") != "connecting" for row in rows):
                 return
             time.sleep(0.01)
         self.assertEqual(snapshot, expected)
@@ -117,8 +118,42 @@ class GitHubProjectsTest(unittest.TestCase):
         projects.add(7)
         self.wait_for(projects, {7: "ready"})
         projects.add(7)
-        self.assertEqual(attempts, [("create", "gh-7", "owner/first")] * 2)
+        self.assertEqual([attempt for attempt in attempts if attempt[0] == "create"],
+                         [("create", "gh-7", "owner/first")] * 2)
         projects.delete(7)
         self.wait_for(projects, {})
         self.assertEqual(attempts[-1], ("delete", "gh-7", None))
         self.assertEqual(credential(self.state, self.app, "aisbx-gh-7", "owner/first.git"), {})
+
+    def test_canvas_failure_keeps_checkout_and_retry_connects_the_same_project(self):
+        fail_connection = True
+        sandboxes = set()
+
+        def sandbox(action, project, repository=None):
+            nonlocal fail_connection
+            if action == "create":
+                sandboxes.add(project)
+            if action == "canvas" and fail_connection:
+                raise ProjectError("agent server unavailable")
+
+        projects = self.open_portal(sandbox)
+        projects.connect()
+        projects.add(7)
+        for _ in range(200):
+            rows = projects.list()["projects"]
+            if rows and rows[0].get("canvas") == "failed":
+                break
+            time.sleep(0.01)
+        self.assertEqual(rows[0]["state"], "ready")
+        self.assertEqual(rows[0].get("canvas"), "failed")
+        self.assertEqual(credential(self.state, self.app, "aisbx-gh-7", "owner/first.git"), {"token": "scoped-1"})
+        fail_connection = False
+        projects.connect_canvas(7)
+        for _ in range(200):
+            row = projects.list()["projects"][0]
+            if row.get("canvas") == "ready":
+                break
+            time.sleep(0.01)
+        self.assertEqual(row["canvas"], "ready")
+        self.assertEqual(sandboxes, {"gh-7"})
+        self.assertEqual(len(projects.list()["projects"]), 1)

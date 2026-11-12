@@ -397,7 +397,7 @@ class Portal:
             action = BROWSER_ACTION.fullmatch(path)
             if method == "POST" and action:
                 return self.change_browser(environ, start_response, session, *action.groups())
-            if path in ("/projects", "/projects/add", "/projects/delete", "/github/connect"):
+            if path in ("/projects", "/projects/add", "/projects/delete", "/projects/canvas", "/github/connect"):
                 if self.owner.has_session(session):
                     return self.projects(environ, start_response, session, path, method)
             if method == "GET" and self.owner.has_session(session):
@@ -461,6 +461,7 @@ class Portal:
             ("GET", "/projects/add"): "repositories",
             ("POST", "/projects/add"): "add",
             ("POST", "/projects/delete"): "delete",
+            ("POST", "/projects/canvas"): "canvas",
         }
         action = actions.get((method, path))
         if action is None:
@@ -472,7 +473,7 @@ class Portal:
             form = submitted_form(environ, max_fields=3, max_length=1024)
             if not hmac.compare_digest(form.get("csrf", "").encode(), csrf.encode()):
                 return respond(start_response, HTTPStatus.FORBIDDEN, "Недействительная форма.\n")
-            if action in ("add", "delete"):
+            if action in ("add", "delete", "canvas"):
                 repository = form.get("repository", "")
                 if not re.fullmatch(r"[1-9][0-9]{0,18}", repository):
                     return respond(start_response, HTTPStatus.BAD_REQUEST, "Выберите репозиторий.\n")
@@ -525,13 +526,24 @@ class Portal:
         }
         status = states[project["state"]]
         inputs = hidden + f'<input type="hidden" name="repository" value="{project["id"]}">'
+        canvas = ""
+        if project["state"] == "ready":
+            connection = project.get("canvas", "pending")
+            if connection == "ready":
+                canvas = f'<p><a href="/canvas/open/{escape(project["sandbox"])}">Открыть</a></p>'
+            elif connection == "connecting":
+                canvas = "<p>Подключение Canvas… Обновите страницу через минуту.</p>"
+            else:
+                label = "Подключение Canvas не завершено" if connection == "failed" else "Canvas ещё не подключён"
+                canvas = (f'<p>{label}</p><form method="post" action="/projects/canvas">{inputs}'
+                          '<button>Подключить Canvas</button></form>')
         retry = (f'<form method="post" action="/projects/add">{inputs}<button>Повторить добавление</button></form>'
                  if project["state"] == "failed" else "")
         delete = (f"""<form method="post" action="/projects/delete">{inputs}
 <label><input type="checkbox" name="confirm" value="yes" required> Удалить рабочую копию и песочницу</label>
 <button>Удалить проект</button></form>""" if project["state"] not in ("creating", "deleting") else "")
         return (f'<li><strong>{escape(project["name"])}</strong> · {status} '
-                f'<code>{escape(project["sandbox"])}</code>{retry}{delete}</li>')
+                f'<code>{escape(project["sandbox"])}</code>{canvas}{retry}{delete}</li>')
 
     def change_browser(self, environ, start_response, session, browser_id, action):
         if not self.owner.has_session(session):
