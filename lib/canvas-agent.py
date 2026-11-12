@@ -29,7 +29,8 @@ if mode == "run":
         OH_BASH_EVENTS_DIR=str(root / "bash_events"), OH_WORKSPACE_PATH="/workspace/repo",
         OH_ENABLE_VSCODE="false", DO_NOT_TRACK="1")
     pidfile.write_text(str(os.getpid()))
-    os.execve("/opt/ai-agent/bin/python", ["python", "-m", "openhands.agent_server", "--host", "127.0.0.1", "--port", "18000"], environment)
+    python = "/opt/ai-agent/bin/python"
+    os.execve(python, [python, "-m", "openhands.agent_server", "--host", "127.0.0.1", "--port", "18000"], environment)
 
 if mode != "configure":
     sys.exit("Expected run, stop or configure")
@@ -54,8 +55,8 @@ marker = config.with_name("canvas-configured")
 if not marker.exists():
     # The Qwen launcher supplies only this project's model-gateway key.
     request("/api/settings", "PATCH", {
-        "agent_settings_diff": {"agent_kind": "acp", "acp_command": "/usr/local/bin/qwen",
-                                "acp_args": ["--acp"], "acp_model": None},
+        "agent_settings_diff": {"agent_kind": "acp", "acp_server": "custom", "acp_command": ["/usr/local/bin/qwen"],
+                                "acp_args": ["--acp"], "acp_model": json.loads(config.with_name("model-gateway.json").read_text())["model"]},
         "misc_settings_diff": {"app_preferences": {"language": "ru", "user_consents_to_analytics": False}},
     })
     marker.write_text("1\n")

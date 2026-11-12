@@ -81,3 +81,30 @@ class CanvasTest(unittest.IsolatedAsyncioTestCase):
             self.owner.change_browser(digest(self.session), digest(self.session), "revoke", "")
             message = await websocket.receive(timeout=2)
             self.assertNotEqual(message.type.name, "TEXT")
+
+    async def test_expiry_closes_idle_event_stream_without_waiting_for_an_agent_event(self):
+        finished = asyncio.Event()
+
+        async def stream(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(b"data: ready\n\n")
+            try:
+                while request.transport and not request.transport.is_closing():
+                    await asyncio.sleep(0.01)
+            finally:
+                finished.set()
+            return response
+
+        backend = web.Application()
+        backend.router.add_get("/api/events", stream)
+        runner = web.AppRunner(backend)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        await web.UnixSite(runner, str(self.root / "gh-7.sock")).start()
+        (self.root / "gh-7.json").write_text(json.dumps({"key": "private-project-key"}))
+        async with self.client.get(self.server.make_url("/agent/gh-7/api/events"),
+                                   cookies={"ai_session": self.session}) as response:
+            self.assertEqual(await response.content.readuntil(b"\n\n"), b"data: ready\n\n")
+            self.now += SESSION_LIFETIME
+            await asyncio.wait_for(finished.wait(), 2)

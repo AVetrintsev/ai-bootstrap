@@ -3,7 +3,6 @@
 import asyncio
 from contextlib import suppress
 import json
-import mimetypes
 from pathlib import Path
 import re
 import socket
@@ -103,8 +102,7 @@ location.replace('/conversations?backend='+encodeURIComponent(id));""".replace("
         watcher = asyncio.create_task(watch_session(request))
         try:
             connector = UnixConnector(path=str(socket_dir / f"{project}.sock"))
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=None, sock_connect=10),
-                                     auto_decompress=False) as upstream:
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=None, sock_connect=10)) as upstream:
                 if request.headers.get("Upgrade", "").lower() == "websocket":
                     async with upstream.ws_connect(url, params=query, headers=headers, max_msg_size=16 * 1024 * 1024) as remote:
                         browser = web.WebSocketResponse(max_msg_size=16 * 1024 * 1024)
