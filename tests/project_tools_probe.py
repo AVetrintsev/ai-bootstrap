@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -60,7 +61,7 @@ graph = MCP(graph_command)
 second = MCP(graph_command)
 serena = None
 name = 'ai_tools_accept_' + uuid.uuid4().hex
-path = Path('/workspace/repo') / (name + '.py')
+path = Path('/workspace/repo') / (name + '.ts')
 
 
 def wait_symbol(symbol, present):
@@ -87,15 +88,17 @@ try:
     assert any(tool['name'] == 'find_code' for tool in tools)
     assert second.call('list_indexed_repositories')['content']
     print('OK concurrent MCP clients share the project graph')
-    path.write_text(f'def {name}():\n    return 42\n')
+    path.write_text(f'export function {name}() {{ return 42; }}\n')
     wait_symbol(name, True)
     serena = MCP(['/opt/ai-serena/bin/serena', 'start-mcp-server', '--project', '/workspace/repo',
-        '--context', 'ide', '--open-web-dashboard', 'false', '--enable-gui-log-window', 'false'])
-    serena.call('initial_instructions')
-    result = serena.call('get_symbols_overview', relative_path=path.name)
+        '--context', 'ide', '--agent-interface', 'tools', '--open-web-dashboard', 'false',
+        '--enable-web-dashboard', 'false', '--enable-gui-log-window', 'false'])
+    instructions = serena.call('initial_instructions')
+    session = re.search(r'session id is `([^`]+)`', json.dumps(instructions)).group(1)
+    result = serena.call('get_symbols_overview', relative_path=path.name, session=session)
     assert name in json.dumps(result), result
     print('OK Serena resolves a symbol in the same checkout')
-    path.write_text(f'def {name}_changed():\n    return 43\n')
+    path.write_text(f'export function {name}_changed() {{ return 43; }}\n')
     wait_symbol(name + '_changed', True)
     wait_symbol(name, False)
     path.unlink()

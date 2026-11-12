@@ -22,6 +22,8 @@ class ProjectWatcher(CodeWatcher):
 
 async def main():
     server = MCPServer(loop=asyncio.get_running_loop(), cwd=Path('/workspace/repo'))
+    if server.db_manager.get_backend_type() != 'falkordb':
+        raise RuntimeError('The project graph requires the configured local FalkorDB backend')
     server.code_watcher = ProjectWatcher(server.graph_builder, server.job_manager)
     await server.run()
 

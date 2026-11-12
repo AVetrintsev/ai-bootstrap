@@ -28,7 +28,7 @@ path = Path('/root/.qwen/settings.json')
 settings = json.loads(path.read_text()) if path.exists() else {}
 servers = settings.setdefault('mcpServers', {})
 servers['serena'] = {'command': '/opt/ai-serena/bin/serena', 'args': [
-    'start-mcp-server', '--project', '/workspace/repo', '--context', 'ide',
+    'start-mcp-server', '--project', '/workspace/repo', '--context', 'ide', '--agent-interface', 'tools',
     '--open-web-dashboard', 'false', '--enable-web-dashboard', 'false',
     '--enable-gui-log-window', 'false'], 'timeout': 180000}
 servers['codegraphcontext'] = {'command': '/usr/bin/python3',

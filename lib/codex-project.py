@@ -19,7 +19,7 @@ for profile in ('chatgpt', 'api'):
         'cli_auth_credentials_store = "file"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
         '[features]\nmulti_agent = false\n'
         '[mcp_servers.serena]\ncommand = "/opt/ai-serena/bin/serena"\n'
-        'args = ["start-mcp-server", "--project", "/workspace/repo", "--context", "ide", '
+        'args = ["start-mcp-server", "--project", "/workspace/repo", "--context", "ide", "--agent-interface", "tools", '
         '"--open-web-dashboard", "false", "--enable-web-dashboard", "false", "--enable-gui-log-window", "false"]\n'
         'cwd = "/workspace/repo"\nenvironment_id = "project"\nstartup_timeout_sec = 120\ntool_timeout_sec = 180\n'
         '[mcp_servers.codegraphcontext]\ncommand = "/usr/bin/python3"\n'

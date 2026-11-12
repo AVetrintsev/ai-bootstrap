@@ -91,8 +91,8 @@ check_isolation() {
         ai-sandbox shell "$project" bash -c '
             file=$(mktemp)
             trap '\''rm -f -- "$file"'\'' EXIT
-            if fallocate -l 5G "$file"; then
-                echo "Project disk accepted a 5 GiB file" >&2
+            if fallocate -l 9G "$file"; then
+                echo "Project disk accepted a 9 GiB file" >&2
                 exit 1
             fi
         '

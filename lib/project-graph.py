@@ -33,9 +33,9 @@ def client():
 class Graph:
     def __init__(self):
         environment = dict(os.environ,
-            DEFAULT_DATABASE='ladybugdb', CGC_RUNTIME_DB_TYPE='ladybugdb',
-            CGC_RUNTIME_DB_PATH='/root/.local/share/ai-codegraph/graph.lbug',
-            CGC_EMBEDDED_BUFFER_POOL_MB='512', PARALLEL_WORKERS='2',
+            DEFAULT_DATABASE='falkordb', CGC_RUNTIME_DB_TYPE='falkordb',
+            CGC_RUNTIME_DB_PATH='/root/.local/share/ai-codegraph/graph.rdb',
+            FALKORDB_PORT='0', FALKORDB_SOCKET_PATH='/run/ai-codegraph-db.sock', PARALLEL_WORKERS='2',
             CGC_IGNORE_PROJECT_ENV='1', CGC_ALLOWED_ROOTS='/workspace/repo',
             CGC_OUTPUT_FORMAT='json', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='2')
         self.process = subprocess.Popen(['/opt/ai-codegraph/bin/python', '-I',

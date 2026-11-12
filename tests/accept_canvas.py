@@ -27,7 +27,7 @@ now = int(time.time())
 marker = "ai-canvas-accept-" + secrets.token_hex(8)
 marker_path = "/workspace/repo/." + marker
 fixture_symbol = 'canvas_tools_' + secrets.token_hex(8)
-fixture_path = '/workspace/repo/' + fixture_symbol + '.py'
+fixture_path = '/workspace/repo/' + fixture_symbol + '.ts'
 executor_stopped = False
 with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
@@ -36,7 +36,7 @@ try:
     if tool == 'project-tools':
         subprocess.run(['ai-sandbox', 'shell', project, 'python3', '-c',
             'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', fixture_path,
-            f'def {fixture_symbol}():\n    return 42\n'], check=True, stdin=subprocess.DEVNULL)
+            f'export function {fixture_symbol}() {{ return 42; }}\n'], check=True, stdin=subprocess.DEVNULL)
         time.sleep(5)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=chromium, headless=True, args=["--no-sandbox"])
@@ -66,10 +66,10 @@ try:
         if tool == 'mcp':
             prompt = f'Call the MCP acceptance probe tool with file="{marker_path}" and text="{marker}". Use only that MCP tool, not shell. Then reply DONE.'
         if tool == 'project-tools':
-            prompt = (f'Acceptance test. Use Serena get_symbols_overview on {fixture_symbol}.py, then '
+            prompt = (f'Acceptance test. First call Serena initial_instructions, then get_symbols_overview on {fixture_symbol}.ts, then '
                       f'CodeGraphContext find_code with query {fixture_symbol}. Both must find the function. '
-                      f'Then use the shell tool to run: cd /workspace/repo && rg {fixture_symbol} {fixture_symbol}.py '
-                      f"&& ast-grep run --lang python --pattern 'def $NAME(): $$$BODY' {fixture_symbol}.py "
+                      f'Then use the shell tool to run: cd /workspace/repo && rg {fixture_symbol} {fixture_symbol}.ts '
+                      f"&& ast-grep run --lang typescript --pattern 'function $NAME() {{ $$$BODY }}' {fixture_symbol}.ts "
                       f"&& printf '%s' '{marker}' > '{marker_path}'. Do not change other files. Reply DONE.")
         def has_tool(transcript):
             if tool == 'project-tools':
