@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 
 from playwright.sync_api import sync_playwright
 
@@ -29,6 +30,8 @@ marker_path = "/workspace/repo/." + marker
 fixture_symbol = 'canvas_tools_' + secrets.token_hex(8)
 fixture_path = '/workspace/repo/' + fixture_symbol + '.ts'
 executor_stopped = False
+test_conversation = None
+context = None
 with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
                (token_hash, now + 600, "Canvas acceptance", now, now))
@@ -60,6 +63,18 @@ try:
             page.reload()
         row.get_by_role("link", name="Открыть" if agent == 'codex' else "Qwen Code", exact=True).click()
         page.get_by_test_id("chat-input").wait_for(timeout=90000)
+        if tool == 'project-tools':
+            # Keep test runs independent of existing conversations and their pending turns.
+            profiles = page.request.get(f'http://localhost:8080/agent/{project}/api/agent-profiles').json()['profiles']
+            profile = next(p for p in profiles if p['name'] == ('codex-subscription' if agent == 'codex' else 'qwen-code'))
+            test_conversation = str(uuid.uuid4())
+            created = page.request.post(f'http://localhost:8080/agent/{project}/api/conversations', data={
+                'conversation_id': test_conversation, 'agent_profile_id': profile['id'],
+                'workspace': {'kind': 'LocalWorkspace', 'working_dir': '/workspace/repo'},
+                'worktree': False, 'autotitle': False})
+            assert created.ok, created.text()
+            page.goto(f'http://localhost:8080/conversations/{test_conversation}?backend={project}')
+            page.get_by_test_id('chat-input').wait_for(timeout=90000)
         print("Canvas URL:", page.url)
         prompt = (f"Use the shell tool to run exactly: test \"$PWD\" = /workspace/repo && printf '%s' '{marker}' > '{marker_path}'\n"
                   "Do not read or change any other files. Then reply DONE.")
@@ -110,7 +125,9 @@ try:
         page.get_by_test_id("chat-input").fill(prompt)
         frames.clear()
         page.get_by_test_id("chat-input").press("Enter")
-        for _ in range(90):
+        # Startup may take 120s; the Codex bridge allows a 600s model turn.
+        deadline = time.monotonic() + (720 if tool == 'project-tools' else 240)
+        while time.monotonic() < deadline:
             result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
                                     capture_output=True, text=True, stdin=subprocess.DEVNULL)
             if result.returncode == 0 and result.stdout == marker:
@@ -169,8 +186,27 @@ try:
             absent = subprocess.run(['ai-sandbox', 'shell', project, 'test', '!', '-e', marker_path + '-blocked'])
             assert absent.returncode == 0, 'Rejected request replayed after recovery'
             print('OK failed Canvas request remains rejected after service recovery')
+        if test_conversation:
+            page.request.post(f'http://localhost:8080/agent/{project}/api/conversations/{test_conversation}/pause')
+            deleted = page.request.delete(f'http://localhost:8080/agent/{project}/api/conversations/{test_conversation}')
+            assert deleted.ok, deleted.text()
+            test_conversation = None
         browser.close()
 finally:
+    if test_conversation:
+        # The browser may already be closed on an exception. Use the existing
+        # authenticated project API inside the sandbox to stop/delete only our fixture.
+        cleanup = '''import json,pathlib,sys,urllib.request,urllib.error
+c=json.loads(pathlib.Path('/root/.config/ai-bootstrap/canvas.json').read_text())
+for suffix,method in [('/pause','POST'),('','DELETE')]:
+ r=urllib.request.Request('http://127.0.0.1:18000/api/conversations/'+sys.argv[1]+suffix,
+   method=method,headers={'X-Session-API-Key':c['key']})
+ try: urllib.request.urlopen(r,timeout=20).close()
+ except urllib.error.HTTPError as e:
+  if e.code != 404: raise
+'''
+        subprocess.run(['ai-sandbox', 'shell', project, 'python3', '-c', cleanup, test_conversation],
+                       stdin=subprocess.DEVNULL, timeout=60, check=True)
     if executor_stopped:
         subprocess.run(['systemctl', 'start', f'ai-bootstrap-codex-executor@{project}.socket'], check=True)
     subprocess.run(["ai-sandbox", "shell", project, "rm", "-f", "--", marker_path, marker_path + '-blocked'],
