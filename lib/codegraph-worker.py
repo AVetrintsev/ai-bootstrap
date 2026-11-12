@@ -3,7 +3,8 @@ import asyncio
 from pathlib import Path
 
 from codegraphcontext.core.watcher import CodeWatcher
-from codegraphcontext.server import MCPServer
+from codegraphcontext.core.database_falkordb import FalkorDBManager
+import codegraphcontext.server as cgc_server
 
 
 class ProjectWatcher(CodeWatcher):
@@ -21,9 +22,10 @@ class ProjectWatcher(CodeWatcher):
 
 
 async def main():
-    server = MCPServer(loop=asyncio.get_running_loop(), cwd=Path('/workspace/repo'))
-    if server.db_manager.get_backend_type() != 'falkordb':
-        raise RuntimeError('The project graph requires the configured local FalkorDB backend')
+    # Pin the factory before construction: CGC's automatic fallback can open
+    # graph.rdb with another database format, preventing a later retry.
+    cgc_server.get_database_manager = FalkorDBManager
+    server = cgc_server.MCPServer(loop=asyncio.get_running_loop(), cwd=Path('/workspace/repo'))
     server.code_watcher = ProjectWatcher(server.graph_builder, server.job_manager)
     await server.run()
 
