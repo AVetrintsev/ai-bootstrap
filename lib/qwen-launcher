@@ -20,4 +20,10 @@ if not any(arg == "--auth-type" or arg.startswith("--auth-type=") for arg in arg
     defaults += ["--auth-type", "openai"]
 if not any(arg in ("--model", "-m") or arg.startswith(("--model=", "-m=")) for arg in arguments):
     defaults += ["--model", settings["model"]]
+if "--acp" in arguments:
+    # Supervise the agent itself: terminating the npm wrapper can leave its
+    # relaunched CLI and MCP children alive after Canvas closes a conversation.
+    environment["QWEN_CODE_NO_RELAUNCH"] = "true"
+    os.execve("/usr/bin/node", ["node", "--expose-gc",
+              "/opt/ai-qwen/lib/node_modules/@qwen-code/qwen-code/cli.js", *defaults, *arguments], environment)
 os.execve("/opt/ai-qwen/bin/qwen", ["qwen", *defaults, *arguments], environment)

@@ -83,7 +83,7 @@ check_isolation() {
         read -r quota period < "$slice/cpu.max"
         [[ $quota == max ]]
         [[ $(<"$slice/memory.max") == max ]]
-        [[ $(<"$slice/pids.max") == 256 ]]
+        [[ $(<"$slice/pids.max") == 512 ]]
         for path in /var/lib/ai-sandboxes /home/owner/.ssh /root/.ssh /etc/ai-bootstrap \
             /run/podman/podman.sock "/run/user/$uid/podman/podman.sock"; do
             deny ai-sandbox shell "$project" test -e "$path"
@@ -91,8 +91,8 @@ check_isolation() {
         ai-sandbox shell "$project" bash -c '
             file=$(mktemp)
             trap '\''rm -f -- "$file"'\'' EXIT
-            if fallocate -l 5G "$file"; then
-                echo "Project disk accepted a 5 GiB file" >&2
+            if fallocate -l 9G "$file"; then
+                echo "Project disk accepted a 9 GiB file" >&2
                 exit 1
             fi
         '

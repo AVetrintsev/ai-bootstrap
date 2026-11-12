@@ -70,7 +70,7 @@ configure_resources() {
     install -d -m 0755 "/etc/systemd/system/user@$uid.service.d"
     publish_unit "/etc/systemd/system/$slice" <<'EOF'
 [Slice]
-TasksMax=256
+TasksMax=512
 EOF
     publish_unit "/etc/systemd/system/user@$uid.service.d/95-sandbox-resources.conf" <<EOF
 [Unit]
@@ -113,7 +113,7 @@ setup_disk() {
     fi
     if [[ ! -e $image ]]; then
         # The final name is only published after the filesystem has been made.
-        fallocate -l 4G "$image.new"
+        fallocate -l 8G "$image.new"
         mkfs.ext4 -q -F -m 0 -E nodiscard "$image.new"
         mv -T -- "$image.new" "$image"
     fi
@@ -215,9 +215,18 @@ create_project() {
     systemctl start "user@$uid.service"
     if ! as_project podman container exists project; then
         base_archive
-        local image=localhost/ai-bootstrap/base:$SANDBOX_BASE_SHA256
+        local base_image=localhost/ai-bootstrap/base:$SANDBOX_BASE_SHA256
+        local image=localhost/ai-bootstrap/project:$SANDBOX_BASE_SHA256-$RIPGREP_VERSION-$AST_GREP_VERSION
+        if ! as_project podman image exists "$base_image"; then
+            as_project podman import - "$base_image" < "$archive" >/dev/null
+        fi
         if ! as_project podman image exists "$image"; then
-            as_project podman import - "$image" < "$archive" >/dev/null
+            as_project podman build --http-proxy=false \
+                --network slirp4netns:allow_host_loopback=false,enable_ipv6=false --dns 1.1.1.1 \
+                --build-arg "BASE_IMAGE=$base_image" --build-arg "RIPGREP_VERSION=$RIPGREP_VERSION" \
+                --build-arg "AST_GREP_VERSION=$AST_GREP_VERSION" --tag "$image" \
+                --file /usr/local/libexec/ai-bootstrap/project-image/Containerfile \
+                /usr/local/libexec/ai-bootstrap/project-image
         fi
         as_project podman --cgroup-manager=systemd create --name project --hostname "$project" \
             --user 0 --userns=keep-id:uid=0,gid=0 \
@@ -231,6 +240,7 @@ create_project() {
     for attempt in {1..20}; do
         if as_project podman exec project /usr/bin/true >/dev/null 2>&1; then
             loginctl enable-linger "$user"
+            configure_search
             configure_qwen
             return
         fi
@@ -276,6 +286,51 @@ github_create() {
     ' _ "$repository"
 }
 
+configure_search() {
+    source /etc/ai-bootstrap/sandbox-release.env
+    as_project podman exec --interactive project bash -s -- "$RIPGREP_VERSION" "$AST_GREP_VERSION" \
+        < /usr/local/libexec/ai-bootstrap/project-search-setup.sh
+}
+
+configure_tools() {
+    local image=$project_dir/disk.ext4 loop generation previous
+    # Grow in place: preserve the rootless container, packages and all project files.
+    if [[ $(stat -c %s "$image") -lt 8589934592 ]]; then
+        fallocate -l 8G "$image"
+    fi
+    loop=$(findmnt -n -o SOURCE --target "$disk")
+    [[ $loop == /dev/loop* ]] || die 'project disk is not mounted on a loop device'
+    losetup -c "$loop"
+    resize2fs "$loop" >/dev/null
+    source /etc/ai-bootstrap/sandbox-release.env
+    configure_search
+    as_project podman exec --interactive project bash -s -- "$SERENA_VERSION" "$CODEGRAPHCONTEXT_VERSION" \
+        < /usr/local/libexec/ai-bootstrap/project-tools-setup.sh
+    generation=$(sha256sum /usr/local/libexec/ai-bootstrap/project-graph.py \
+        /usr/local/libexec/ai-bootstrap/codegraph-worker.py \
+        /usr/local/libexec/ai-bootstrap/project-tools-exec /etc/systemd/user/ai-bootstrap-project-tools.service \
+        /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
+    previous=$(as_project podman exec project cat /opt/ai-project-tools/generation 2>/dev/null || true)
+    as_project podman cp /usr/local/libexec/ai-bootstrap/project-graph.py project:/opt/ai-project-tools/graph.py
+    as_project podman cp /usr/local/libexec/ai-bootstrap/codegraph-worker.py project:/opt/ai-project-tools/codegraph-worker.py
+    as_project systemctl --user daemon-reload
+    as_project systemctl --user enable ai-bootstrap-project-tools.service
+    if [[ $previous != "$generation" ]]; then
+        as_project systemctl --user restart ai-bootstrap-project-tools.service
+    else
+        as_project systemctl --user start ai-bootstrap-project-tools.service
+    fi
+    # This records deployed code, not readiness. A timeout/retry must not restart a live index job.
+    printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-project-tools/generation'
+    for attempt in {1..400}; do
+        if as_project podman exec project python3 -I /opt/ai-project-tools/graph.py ready >/dev/null 2>&1; then
+            return
+        fi
+        sleep 2
+    done
+    die 'project index is not ready; retry setup in the same sandbox'
+}
+
 configure_codex() {
     [[ -x /opt/ai-codex/bin/codex ]] || die 'install Codex on the platform before connecting Canvas'
     source /etc/ai-bootstrap/sandbox-release.env
@@ -317,10 +372,15 @@ configure_canvas() {
     flock 9
     project_account
     configure_qwen
+    configure_tools
     configure_codex
     source /etc/ai-bootstrap/sandbox-release.env
     local generation previous
-    generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py | cut -d ' ' -f 1)"
+    generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py \
+        /usr/local/libexec/ai-bootstrap/project-tools-setup.sh \
+        /usr/local/libexec/ai-bootstrap/qwen-launcher \
+        /usr/local/libexec/ai-bootstrap/project-graph.py /usr/local/libexec/ai-bootstrap/codegraph-worker.py \
+        "$project_dir/codex-generation" | sha256sum | cut -d ' ' -f 1)"
     previous=$(as_project podman exec project cat /opt/ai-canvas-control/generation 2>/dev/null || true)
     as_project podman exec project test -d /workspace/repo/.git
     as_project podman exec --interactive project bash -s -- "$AGENT_SERVER_VERSION" \
@@ -413,11 +473,19 @@ case $action in
     github-create) github_create "$@" ;;
     github-delete) github_delete "$@" ;;
     canvas-setup) configure_canvas "$@" ;;
+    tools-setup)
+        [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
+        exec 9>/run/lock/ai-bootstrap-sandbox.lock
+        flock 9
+        project_account
+        configure_tools
+        ;;
     codex-setup)
         [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
         exec 9>/run/lock/ai-bootstrap-sandbox.lock
         flock 9
         project_account
+        configure_tools
         configure_codex
         ;;
     resources)
