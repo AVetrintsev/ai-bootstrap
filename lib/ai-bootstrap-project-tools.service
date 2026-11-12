@@ -8,7 +8,7 @@ ExecStart=/usr/local/libexec/ai-bootstrap/project-tools-exec run
 ExecStop=/usr/local/libexec/ai-bootstrap/project-tools-exec stop
 Restart=always
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=120
 
 [Install]
 WantedBy=default.target

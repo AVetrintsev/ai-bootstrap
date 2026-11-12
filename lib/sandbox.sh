@@ -215,9 +215,18 @@ create_project() {
     systemctl start "user@$uid.service"
     if ! as_project podman container exists project; then
         base_archive
-        local image=localhost/ai-bootstrap/base:$SANDBOX_BASE_SHA256
+        local base_image=localhost/ai-bootstrap/base:$SANDBOX_BASE_SHA256
+        local image=localhost/ai-bootstrap/project:$SANDBOX_BASE_SHA256-$RIPGREP_VERSION-$AST_GREP_VERSION
+        if ! as_project podman image exists "$base_image"; then
+            as_project podman import - "$base_image" < "$archive" >/dev/null
+        fi
         if ! as_project podman image exists "$image"; then
-            as_project podman import - "$image" < "$archive" >/dev/null
+            as_project podman build --http-proxy=false \
+                --network slirp4netns:allow_host_loopback=false,enable_ipv6=false --dns 1.1.1.1 \
+                --build-arg "BASE_IMAGE=$base_image" --build-arg "RIPGREP_VERSION=$RIPGREP_VERSION" \
+                --build-arg "AST_GREP_VERSION=$AST_GREP_VERSION" --tag "$image" \
+                --file /usr/local/libexec/ai-bootstrap/project-image/Containerfile \
+                /usr/local/libexec/ai-bootstrap/project-image
         fi
         as_project podman --cgroup-manager=systemd create --name project --hostname "$project" \
             --user 0 --userns=keep-id:uid=0,gid=0 \
@@ -231,6 +240,7 @@ create_project() {
     for attempt in {1..20}; do
         if as_project podman exec project /usr/bin/true >/dev/null 2>&1; then
             loginctl enable-linger "$user"
+            configure_search
             configure_qwen
             return
         fi
@@ -276,6 +286,12 @@ github_create() {
     ' _ "$repository"
 }
 
+configure_search() {
+    source /etc/ai-bootstrap/sandbox-release.env
+    as_project podman exec --interactive project bash -s -- "$RIPGREP_VERSION" "$AST_GREP_VERSION" \
+        < /usr/local/libexec/ai-bootstrap/project-search-setup.sh
+}
+
 configure_tools() {
     local image=$project_dir/disk.ext4 loop generation previous
     # Grow in place: preserve the rootless container, packages and all project files.
@@ -287,13 +303,16 @@ configure_tools() {
     losetup -c "$loop"
     resize2fs "$loop" >/dev/null
     source /etc/ai-bootstrap/sandbox-release.env
-    as_project podman exec --interactive project bash -s -- "$RIPGREP_VERSION" "$AST_GREP_VERSION" \
-        "$SERENA_VERSION" "$CODEGRAPHCONTEXT_VERSION" < /usr/local/libexec/ai-bootstrap/project-tools-setup.sh
+    configure_search
+    as_project podman exec --interactive project bash -s -- "$SERENA_VERSION" "$CODEGRAPHCONTEXT_VERSION" \
+        < /usr/local/libexec/ai-bootstrap/project-tools-setup.sh
     generation=$(sha256sum /usr/local/libexec/ai-bootstrap/project-graph.py \
+        /usr/local/libexec/ai-bootstrap/codegraph-worker.py \
         /usr/local/libexec/ai-bootstrap/project-tools-exec /etc/systemd/user/ai-bootstrap-project-tools.service \
         /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
     previous=$(as_project podman exec project cat /opt/ai-project-tools/generation 2>/dev/null || true)
     as_project podman cp /usr/local/libexec/ai-bootstrap/project-graph.py project:/opt/ai-project-tools/graph.py
+    as_project podman cp /usr/local/libexec/ai-bootstrap/codegraph-worker.py project:/opt/ai-project-tools/codegraph-worker.py
     as_project systemctl --user daemon-reload
     as_project systemctl --user enable ai-bootstrap-project-tools.service
     if [[ $previous != "$generation" ]]; then
@@ -301,9 +320,10 @@ configure_tools() {
     else
         as_project systemctl --user start ai-bootstrap-project-tools.service
     fi
+    # This records deployed code, not readiness. A timeout/retry must not restart a live index job.
+    printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-project-tools/generation'
     for attempt in {1..400}; do
         if as_project podman exec project python3 -I /opt/ai-project-tools/graph.py ready >/dev/null 2>&1; then
-            printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-project-tools/generation'
             return
         fi
         sleep 2

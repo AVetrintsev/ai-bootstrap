@@ -73,13 +73,31 @@ try:
                       f"&& printf '%s' '{marker}' > '{marker_path}'. Do not change other files. Reply DONE.")
         def has_tool(transcript):
             if tool == 'project-tools':
-                # Tool names must arrive in live events, not only in the user's prompt.
-                events = '\n'.join(frame.decode() if isinstance(frame, bytes) else frame for frame in frames)
-                return ('get_symbols_overview' in events and 'find_code' in events and
-                        ('tool_call' in events or 'ToolEvent' in events))
+                completed = set()
+                def inspect(value):
+                    if isinstance(value, dict):
+                        if (value.get('tool_call_id') and value.get('source') == 'agent' and
+                                value.get('status') == 'completed' and not value.get('is_error')):
+                            output = json.dumps(value.get('raw_output') or value.get('content'), ensure_ascii=False)
+                            if fixture_symbol in output:
+                                for name in ('get_symbols_overview', 'find_code'):
+                                    if name in value.get('title', ''):
+                                        completed.add(name)
+                        for child in value.values():
+                            inspect(child)
+                    elif isinstance(value, list):
+                        for child in value:
+                            inspect(child)
+                for frame in frames:
+                    try:
+                        inspect(json.loads(frame))
+                    except (ValueError, TypeError):
+                        continue
+                return completed == {'get_symbols_overview', 'find_code'}
             return (any(line.strip() == 'probe' for line in transcript.splitlines()) if tool == 'mcp' else
                     any(marker in line and ('Running Shell:' in line or '/bin/bash' in line) for line in transcript.splitlines()))
         page.get_by_test_id("chat-input").fill(prompt)
+        frames.clear()
         page.get_by_test_id("chat-input").press("Enter")
         for _ in range(90):
             result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
@@ -93,6 +111,9 @@ try:
                 approval.first.click()
             page.wait_for_timeout(2000)
         else:
+            if tool == 'project-tools':
+                with open('/tmp/' + marker + '-events.json', 'w') as output:
+                    json.dump([frame.decode() if isinstance(frame, bytes) else frame for frame in frames], output)
             print("Canvas failure:", page.locator("body").inner_text())
             raise AssertionError(f"{agent} result was not confirmed in both the checkout and Canvas tool output")
         page.wait_for_timeout(2000)

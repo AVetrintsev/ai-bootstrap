@@ -20,7 +20,7 @@ for profile in ('chatgpt', 'api'):
         '[features]\nmulti_agent = false\n'
         '[mcp_servers.serena]\ncommand = "/opt/ai-serena/bin/serena"\n'
         'args = ["start-mcp-server", "--project", "/workspace/repo", "--context", "ide", '
-        '"--open-web-dashboard", "false", "--enable-gui-log-window", "false"]\n'
+        '"--open-web-dashboard", "false", "--enable-web-dashboard", "false", "--enable-gui-log-window", "false"]\n'
         'cwd = "/workspace/repo"\nenvironment_id = "project"\nstartup_timeout_sec = 120\ntool_timeout_sec = 180\n'
         '[mcp_servers.codegraphcontext]\ncommand = "/usr/bin/python3"\n'
         'args = ["-I", "/opt/ai-project-tools/graph.py", "client"]\n'

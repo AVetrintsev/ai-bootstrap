@@ -256,7 +256,12 @@ configure_sandbox() {
     publish "$release/lib/gateway-address.py" "$libexec/gateway-address.py" 644
     publish "$release/lib/ai-bootstrap-sandbox.service" /etc/systemd/user/ai-bootstrap-sandbox.service 644
     publish "$release/lib/project-tools-setup.sh" "$libexec/project-tools-setup.sh" 644
+    publish "$release/lib/project-search-setup.sh" "$libexec/project-search-setup.sh" 644
+    install -d -m 0755 "$libexec/project-image"
+    publish "$release/lib/project-search-setup.sh" "$libexec/project-image/project-search-setup.sh" 644
+    publish "$release/lib/sandbox.Containerfile" "$libexec/project-image/Containerfile" 644
     publish "$release/lib/project-graph.py" "$libexec/project-graph.py" 644
+    publish "$release/lib/codegraph-worker.py" "$libexec/codegraph-worker.py" 644
     publish "$release/lib/project-tools-exec" "$libexec/project-tools-exec" 755
     publish "$release/lib/ai-bootstrap-project-tools.service" /etc/systemd/user/ai-bootstrap-project-tools.service 644
     publish "$work/sandbox-settings" "$etc/sandbox-settings" 600

@@ -33,26 +33,29 @@ def client():
 class Graph:
     def __init__(self):
         environment = dict(os.environ,
-            CGC_EMBEDDED_BUFFER_POOL_MB='128', PARALLEL_WORKERS='2',
+            DEFAULT_DATABASE='ladybugdb', CGC_RUNTIME_DB_TYPE='ladybugdb',
+            CGC_RUNTIME_DB_PATH='/root/.local/share/ai-codegraph/graph.lbug',
+            CGC_EMBEDDED_BUFFER_POOL_MB='512', PARALLEL_WORKERS='2',
             CGC_IGNORE_PROJECT_ENV='1', CGC_ALLOWED_ROOTS='/workspace/repo',
             CGC_OUTPUT_FORMAT='json', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='2')
-        self.process = subprocess.Popen(['/opt/ai-codegraph/bin/cgc', '--database', 'ladybugdb',
-            '--db-path', '/root/.local/share/ai-codegraph/graph.lbug', 'mcp', 'start'],
+        self.process = subprocess.Popen(['/opt/ai-codegraph/bin/python', '-I',
+            '/opt/ai-project-tools/codegraph-worker.py'],
             cwd='/workspace/repo', env=environment, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             bufsize=0)
         self.lock = threading.Lock()
         self.sequence = 0
 
-    def request(self, message):
+    def request(self, message, timeout=180):
         with self.lock:
             self.sequence += 1
             identity = self.sequence
             self.process.stdin.write((json.dumps(dict(message, jsonrpc='2.0', id=identity)) + '\n').encode())
-            deadline = time.monotonic() + 180
+            deadline = time.monotonic() + timeout if timeout is not None else None
             # Unbuffered byte reads avoid hiding a second line behind select().
             line = bytearray()
-            while time.monotonic() < deadline:
-                if not select.select([self.process.stdout], [], [], max(0, deadline - time.monotonic()))[0]:
+            while deadline is None or time.monotonic() < deadline:
+                remaining = max(0, deadline - time.monotonic()) if deadline is not None else None
+                if not select.select([self.process.stdout], [], [], remaining)[0]:
                     break
                 char = self.process.stdout.read(1)
                 if not char:
@@ -71,8 +74,8 @@ class Graph:
                     return response
             raise TimeoutError('CodeGraphContext did not respond')
 
-    def tool(self, name, arguments):
-        response = self.request({'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}})
+    def tool(self, name, arguments, timeout=180):
+        response = self.request({'method': 'tools/call', 'params': {'name': name, 'arguments': arguments}}, timeout)
         if 'error' in response or response.get('result', {}).get('isError'):
             raise RuntimeError(f'CodeGraphContext {name} failed: {response}')
         result = json.loads(response['result']['content'][0]['text'])
@@ -84,14 +87,20 @@ class Graph:
         self.request({'method': 'initialize', 'params': {'protocolVersion': '2025-03-26',
             'capabilities': {}, 'clientInfo': {'name': 'ai-bootstrap', 'version': '1'}}})
         # CGC synchronizes existing repositories here and starts an index job for new ones.
-        job = self.tool('watch_directory', {'path': '/workspace/repo'})
-        deadline = time.monotonic() + 600
+        # Existing large repositories synchronize synchronously in this pinned CGC release.
+        # Keep that work alive when a provisioning request times out; a retry reuses it.
+        job = self.tool('watch_directory', {'path': '/workspace/repo'}, timeout=None)
+        previous = None
         while job.get('job_id'):
             result = self.tool('check_job_status', {'job_id': job['job_id']})
             status = result.get('job', result)
-            if status.get('status') == 'completed':
+            state = status.get('status')
+            if state != previous:
+                print(f'Project graph index: {state}', file=sys.stderr, flush=True)
+                previous = state
+            if state == 'completed':
                 break
-            if status.get('status') in ('failed', 'cancelled', 'not_found') or time.monotonic() >= deadline:
+            if state not in ('pending', 'running'):
                 raise RuntimeError(f'Initial graph index failed: {status}')
             time.sleep(1)
 
@@ -99,7 +108,7 @@ class Graph:
         # EOF runs CGC's own watcher shutdown and database checkpoint.
         self.process.stdin.close()
         try:
-            self.process.wait(timeout=20)
+            self.process.wait(timeout=90)
         except subprocess.TimeoutExpired:
             self.process.terminate()
             try:
