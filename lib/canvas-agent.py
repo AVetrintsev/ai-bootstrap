@@ -68,6 +68,15 @@ if not marker.exists() or marker.read_text().strip() != "2":
     profile = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "qwen-code")
     request("/api/agent-profiles/" + profile["id"] + "/activate", "POST")
     marker.write_text("2\n")
+codex_marker = config.with_name("codex-configured")
+if not codex_marker.exists():
+    request("/api/agent-profiles/codex-subscription", "POST", {
+        "agent_kind": "acp", "acp_server": "custom", "acp_command": "/usr/local/bin/codex",
+        "acp_args": ["--acp"],
+    })
+    profile = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "codex-subscription")
+    request("/api/agent-profiles/" + profile["id"] + "/activate", "POST")
+    codex_marker.write_text("1\n")
 try:
     request("/api/conversations/" + settings["conversation_id"])
 except urllib.error.HTTPError as error:
@@ -79,4 +88,15 @@ except urllib.error.HTTPError as error:
         "workspace": {"kind": "LocalWorkspace", "working_dir": "/workspace/repo"},
         "worktree": False, "autotitle": False,
     })
-print("OK Agent Server and Qwen ACP profile")
+try:
+    request("/api/conversations/" + settings["codex_conversation_id"])
+except urllib.error.HTTPError as error:
+    if error.code != 404:
+        raise
+    profile = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "codex-subscription")
+    request("/api/conversations", "POST", {
+        "conversation_id": settings["codex_conversation_id"], "agent_profile_id": profile["id"],
+        "workspace": {"kind": "LocalWorkspace", "working_dir": "/workspace/repo"},
+        "worktree": False, "autotitle": False,
+    })
+print("OK Agent Server, Codex and Qwen ACP profiles")

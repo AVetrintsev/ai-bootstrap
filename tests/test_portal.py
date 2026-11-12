@@ -21,6 +21,14 @@ from portal import Portal, print_activation_url
 
 
 class PortalTest(unittest.TestCase):
+    def test_codex_setup_requires_owner_session_and_reports_service_unavailable(self):
+        for path in ("/codex", "/codex/login", "/codex/profile"):
+            self.assertEqual(self.request(path)[0], 404)
+        cookie, _, _ = self.enroll()
+        status, _, body = self.request("/codex", cookie=cookie)
+        self.assertEqual(status, 503)
+        self.assertIn("Служба Codex недоступна".encode(), body)
+
     def setUp(self):
         self.work = tempfile.TemporaryDirectory()
         self.addCleanup(self.work.cleanup)
@@ -30,7 +38,8 @@ class PortalTest(unittest.TestCase):
         self.portal = self.new_portal()
 
     def new_portal(self, *, secure=False):
-        return Portal(self.state, self.key, clock=lambda: self.time, secure=secure)
+        return Portal(self.state, self.key, clock=lambda: self.time, secure=secure,
+                      codex_socket=str(self.state / 'codex.sock'))
 
     def activation(self, base="http://localhost:8080"):
         output = StringIO()

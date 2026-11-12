@@ -343,6 +343,34 @@ configure_canvas() {
     systemctl try-restart ai-bootstrap-canvas.service
 }
 
+configure_codex() {
+    ensure_packages socat
+    service_account ai-codex /var/lib/ai-codex
+    install -d -m 0700 -o ai-codex -g ai-codex /var/lib/ai-codex /var/lib/ai-codex/auth
+    install -d -m 0755 /opt/ai-codex/bin
+    if [[ ! -x /opt/ai-codex/bin/codex || $(/opt/ai-codex/bin/codex --version) != "codex-cli $CODEX_VERSION" ]]; then
+        quiet 'could not download pinned Codex' curl -q --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --output "$work/codex.tgz" \
+            "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-x86_64-unknown-linux-musl.tar.gz"
+        printf '%s  %s\n' "$CODEX_SHA256" "$work/codex.tgz" | sha256sum --check --status || fail 'Codex checksum mismatch'
+        tar -xzf "$work/codex.tgz" -C "$work" --no-same-owner codex-x86_64-unknown-linux-musl
+        publish "$work/codex-x86_64-unknown-linux-musl" /opt/ai-codex/bin/codex 755
+    fi
+    local file unit
+    for file in codex_service.py codex-project.py codex-executor.py codex-client; do
+        publish "$release/lib/$file" "$libexec/$file" 644
+    done
+    publish "$release/lib/codex-api-key" /usr/local/sbin/ai-codex-api-key 755
+    for unit in ai-bootstrap-codex.socket ai-bootstrap-codex.service \
+        ai-bootstrap-codex-project@.socket ai-bootstrap-codex-project@.service \
+        ai-bootstrap-codex-executor@.socket ai-bootstrap-codex-executor@.service; do
+        publish "$release/lib/$unit" "/etc/systemd/system/$unit" 644
+    done
+    systemctl daemon-reload
+    systemctl enable --now ai-bootstrap-codex.socket
+    systemctl try-restart ai-bootstrap-codex.service
+}
+
 configure_github_projects() {
     service_account ai-github /var/lib/ai-github
     install -d -m 0755 "$libexec/github-sandbox"
@@ -364,6 +392,7 @@ configure_portal() {
     service_account ai-portal "$portal_state"
     install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
     configure_canvas
+    configure_codex
     configure_github_projects
     if [[ ! -e $etc/portal.key ]]; then
         [[ ! -e $portal_state/portal.sqlite3 ]] || fail 'restore the portal encryption key'

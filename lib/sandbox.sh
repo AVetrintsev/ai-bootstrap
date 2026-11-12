@@ -276,6 +276,16 @@ github_create() {
     ' _ "$repository"
 }
 
+configure_codex() {
+    [[ -x /opt/ai-codex/bin/codex ]] || die 'install Codex on the platform before connecting Canvas'
+    as_project podman exec project install -d -m 0755 /opt/ai-codex
+    as_project podman cp /opt/ai-codex/bin/codex project:/opt/ai-codex/codex
+    as_project podman cp /usr/local/libexec/ai-bootstrap/codex-client project:/usr/local/bin/codex
+    as_project podman exec project chmod 0755 /usr/local/bin/codex /opt/ai-codex/codex
+    runuser -u ai-codex -- python3 -I /usr/local/libexec/ai-bootstrap/codex-project.py "$project"
+    systemctl enable --now "ai-bootstrap-codex-executor@$project.socket" "ai-bootstrap-codex-project@$project.socket"
+}
+
 configure_canvas() {
     [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
     [[ -f /etc/ai-bootstrap/model-gateway.json ]] || die 'configure the model gateway before Canvas'
@@ -283,6 +293,7 @@ configure_canvas() {
     flock 9
     project_account
     configure_qwen
+    configure_codex
     source /etc/ai-bootstrap/sandbox-release.env
     local generation previous
     generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py | cut -d ' ' -f 1)"
@@ -296,7 +307,9 @@ path=pathlib.Path('/var/lib/ai-canvas/connections')/(sys.argv[1]+'.json')
 settings=json.loads(path.read_text()) if path.exists() else {'key':secrets.token_urlsafe(32)}
 if 'conversation_id' not in settings:
     settings['conversation_id']=str(uuid.uuid4())
-    path.write_text(json.dumps(settings))
+if 'codex_conversation_id' not in settings:
+    settings['codex_conversation_id']=str(uuid.uuid4())
+path.write_text(json.dumps(settings))
 path.chmod(0o640)
 os.chown(path,0,grp.getgrnam('ai-portal').gr_gid)
 PY
@@ -339,6 +352,11 @@ github_delete() {
         systemctl disable --now "ai-bootstrap-canvas-relay@$project.socket"
         systemctl stop "ai-bootstrap-canvas-relay@$project.service"
         rm -f -- "/var/lib/ai-canvas/connections/$project.json"
+    fi
+    if [[ -f /etc/systemd/system/ai-bootstrap-codex-project@.socket ]]; then
+        systemctl disable --now "ai-bootstrap-codex-project@$project.socket" "ai-bootstrap-codex-executor@$project.socket"
+        systemctl stop "ai-bootstrap-codex-project@$project.service" "ai-bootstrap-codex-executor@$project.service"
+        rm -rf -- "/var/lib/ai-codex/projects/$project"
     fi
     if ! id "$user" >/dev/null 2>&1; then
         [[ ! -e $project_dir/disk.ext4 ]] && ! mountpoint -q -- "$disk" || die 'project account is missing'

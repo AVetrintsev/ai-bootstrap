@@ -1,0 +1,12 @@
+[Unit]
+Description=Private Codex account control
+
+[Socket]
+ListenStream=/run/ai-bootstrap-codex.sock
+SocketUser=ai-codex
+SocketGroup=ai-portal
+SocketMode=0660
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

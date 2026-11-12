@@ -1,0 +1,26 @@
+#!/usr/bin/python3 -I
+"""Configure the optional API profile without activating paid usage."""
+import getpass
+import grp
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+if os.geteuid() != 0:
+    sys.exit('Run as root')
+key = getpass.getpass('OpenAI API key (hidden): ').strip()
+if not key or len(key) > 4096 or any(char.isspace() for char in key):
+    sys.exit('Invalid API key')
+directory = Path('/etc/ai-bootstrap')
+fd, name = tempfile.mkstemp(dir=directory, prefix='.codex-api-')
+try:
+    with os.fdopen(fd, 'w') as output:
+        output.write(key + '\n')
+        os.fchmod(output.fileno(), 0o640)
+        os.fchown(output.fileno(), 0, grp.getgrnam('ai-codex').gr_gid)
+    os.replace(name, directory / 'codex-api.key')
+finally:
+    if os.path.exists(name):
+        os.unlink(name)
+print('API profile configured. Activate it explicitly in the portal /codex.')
