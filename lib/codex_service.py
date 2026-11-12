@@ -34,7 +34,8 @@ class CodexError(Exception):
 
 def error_kind(error):
     """Use structured protocol codes; never expose arbitrary upstream errors."""
-    info = error.get('codexErrorInfo') or error.get('data', {}).get('codexErrorInfo')
+    data = error.get('data')
+    info = error.get('codexErrorInfo') or (data.get('codexErrorInfo') if isinstance(data, dict) else None)
     if info == 'usageLimitExceeded':
         return 'limit_reached'
     if info == 'unauthorized':
@@ -263,6 +264,7 @@ class ProjectSession:
         result = await self.server.call('turn/start', {'threadId': self.session,
             'input': [{'type': 'text', 'text': p['text'], 'text_elements': []} for p in parts]})
         self.turn = result['turn']['id']
+        completed = False
         try:
             async with asyncio.timeout(600):
                 while True:
@@ -289,13 +291,19 @@ class ProjectSession:
                         if turn['status'] == 'failed':
                             raise CodexError(error_kind(turn.get('error') or {}))
                         await self.executor()
+                        completed = True
                         return {'stopReason': 'cancelled' if turn['status'] == 'interrupted' else 'end_turn'}
         finally:
+            if not completed:
+                with suppress(CodexError, OSError):
+                    await self.server.call('turn/interrupt', {'threadId': self.session, 'turnId': self.turn}, timeout=5)
             self.turn = None
 
     async def handle(self, message):
         key, method, params = message.get('id'), message.get('method'), message.get('params') or {}
         try:
+            if not isinstance(params, dict):
+                raise ValueError('Ожидается объект параметров.')
             if method == 'initialize':
                 result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True},
                           'agentInfo': {'name': 'ai-bootstrap-codex', 'version': '1'}, 'authMethods': []}

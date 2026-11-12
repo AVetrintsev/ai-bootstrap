@@ -10,9 +10,12 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-if os.geteuid() != 0 or len(sys.argv) != 3:
-    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM")
-project, chromium = sys.argv[1:]
+if os.geteuid() != 0 or len(sys.argv) not in (3, 4):
+    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex]")
+project, chromium = sys.argv[1:3]
+agent = sys.argv[3] if len(sys.argv) == 4 else 'qwen'
+if agent not in ('qwen', 'codex'):
+    sys.exit('Expected qwen or codex')
 session = secrets.token_urlsafe(32)
 token_hash = hashlib.sha256(session.encode()).digest()
 database = "/var/lib/ai-portal/portal.sqlite3"
@@ -43,7 +46,7 @@ try:
                 break
             page.wait_for_timeout(2000)
             page.reload()
-        row.get_by_role("link", name="Открыть", exact=True).click()
+        row.get_by_role("link", name="Открыть" if agent == 'codex' else "Qwen Code", exact=True).click()
         page.get_by_test_id("chat-input").wait_for(timeout=90000)
         print("Canvas URL:", page.url)
         prompt = (f"Use the shell tool to run exactly: test \"$PWD\" = /workspace/repo && printf '%s' '{marker}' > '{marker_path}'\n"
@@ -55,7 +58,7 @@ try:
                                     capture_output=True, text=True)
             if result.returncode == 0 and result.stdout == marker:
                 transcript = page.locator("body").inner_text()
-                if any(line.startswith("Running Shell:") and marker in line for line in transcript.splitlines()):
+                if any(marker in line and ('Running Shell:' in line or '/bin/bash' in line) for line in transcript.splitlines()):
                     break
             approval = page.get_by_role("button", name=re.compile(r"^(Allow once|Approve|Allow|Разрешить)$", re.I))
             if approval.count() and approval.first.is_visible():
@@ -63,14 +66,14 @@ try:
             page.wait_for_timeout(2000)
         else:
             print("Canvas failure:", page.locator("body").inner_text())
-            raise AssertionError("Qwen result was not confirmed in both the checkout and Canvas tool output")
+            raise AssertionError(f"{agent} result was not confirmed in both the checkout and Canvas tool output")
         page.wait_for_timeout(2000)
         transcript = page.locator("body").inner_text()
         print("Canvas result:", transcript)
-        assert any(line.startswith("Running Shell:") and marker in line for line in transcript.splitlines()), "No matching Qwen tool in Canvas"
+        assert any(marker in line and ('Running Shell:' in line or '/bin/bash' in line) for line in transcript.splitlines()), "No matching agent tool in Canvas"
         assert frames, "No live WebSocket events"
         print("WebSocket events:", len(frames))
-        print("OK Qwen wrote the marker in the same checkout used by ai-sandbox shell")
+        print(f"OK {agent} wrote the marker in the same checkout used by ai-sandbox shell")
         screenshot = "/tmp/" + marker + ".png"
         page.screenshot(path=screenshot, full_page=True)
         print("Screenshot:", screenshot)

@@ -347,14 +347,17 @@ configure_codex() {
     ensure_packages socat
     service_account ai-codex /var/lib/ai-codex
     install -d -m 0700 -o ai-codex -g ai-codex /var/lib/ai-codex /var/lib/ai-codex/auth
-    install -d -m 0755 /opt/ai-codex/bin
-    if [[ ! -x /opt/ai-codex/bin/codex || $(/opt/ai-codex/bin/codex --version) != "codex-cli $CODEX_VERSION" ]]; then
+    if [[ ! -x /opt/ai-codex/bin/codex-code-mode-host || ! -x /opt/ai-codex/bin/codex || $(/opt/ai-codex/bin/codex --version) != "codex-cli $CODEX_VERSION" ]]; then
         quiet 'could not download pinned Codex' curl -q --fail --silent --show-error --location \
             --proto '=https' --proto-redir '=https' --output "$work/codex.tgz" \
-            "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-x86_64-unknown-linux-musl.tar.gz"
+            "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-package-x86_64-unknown-linux-musl.tar.gz"
         printf '%s  %s\n' "$CODEX_SHA256" "$work/codex.tgz" | sha256sum --check --status || fail 'Codex checksum mismatch'
-        tar -xzf "$work/codex.tgz" -C "$work" --no-same-owner codex-x86_64-unknown-linux-musl
-        publish "$work/codex-x86_64-unknown-linux-musl" /opt/ai-codex/bin/codex 755
+        install -d -m 0755 "$work/codex-package"
+        tar -xzf "$work/codex.tgz" -C "$work/codex-package" --no-same-owner
+        chmod -R a+rX "$work/codex-package"
+        rm -rf -- /opt/ai-codex.previous
+        if [[ -d /opt/ai-codex ]]; then mv /opt/ai-codex /opt/ai-codex.previous; fi
+        mv "$work/codex-package" /opt/ai-codex
     fi
     local file unit
     for file in codex_service.py codex-project.py codex-executor.py codex-client; do

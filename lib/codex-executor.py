@@ -19,7 +19,7 @@ async def main():
             child = await asyncio.create_subprocess_exec(
                 'podman', 'exec', '--interactive', '--workdir', '/workspace/repo',
                 '--env', 'CODEX_HOME=/tmp/ai-codex-executor', '--env', 'TOKIO_WORKER_THREADS=2',
-                'project', '/opt/ai-codex/codex', 'exec-server', '--listen', 'stdio',
+                'project', '/opt/ai-codex/bin/codex', 'exec-server', '--listen', 'stdio',
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL, env=environment)
 

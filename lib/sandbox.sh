@@ -278,10 +278,21 @@ github_create() {
 
 configure_codex() {
     [[ -x /opt/ai-codex/bin/codex ]] || die 'install Codex on the platform before connecting Canvas'
-    as_project podman exec project install -d -m 0755 /opt/ai-codex
-    as_project podman cp /opt/ai-codex/bin/codex project:/opt/ai-codex/codex
+    source /etc/ai-bootstrap/sandbox-release.env
+    local installed
+    installed=$(as_project podman exec project cat /opt/ai-codex/ai-bootstrap-version 2>/dev/null || true)
+    if [[ $installed != "$CODEX_VERSION:$CODEX_SHA256" ]]; then
+        as_project podman exec project sh -eu -c 'rm -rf /opt/ai-codex.next; install -d -m 0755 /opt/ai-codex.next'
+        as_project podman cp /opt/ai-codex/. project:/opt/ai-codex.next/
+        as_project podman exec project sh -eu -c '
+            rm -rf /opt/ai-codex.previous
+            if [ -d /opt/ai-codex ]; then mv /opt/ai-codex /opt/ai-codex.previous; fi
+            mv /opt/ai-codex.next /opt/ai-codex
+            printf "%s" "$1" > /opt/ai-codex/ai-bootstrap-version
+        ' _ "$CODEX_VERSION:$CODEX_SHA256"
+    fi
     as_project podman cp /usr/local/libexec/ai-bootstrap/codex-client project:/usr/local/bin/codex
-    as_project podman exec project chmod 0755 /usr/local/bin/codex /opt/ai-codex/codex
+    as_project podman exec project chmod 0755 /usr/local/bin/codex
     runuser -u ai-codex -- python3 -I /usr/local/libexec/ai-bootstrap/codex-project.py "$project"
     systemctl enable --now "ai-bootstrap-codex-executor@$project.socket" "ai-bootstrap-codex-project@$project.socket"
 }
