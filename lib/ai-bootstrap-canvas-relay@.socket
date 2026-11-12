@@ -1,0 +1,13 @@
+[Unit]
+Description=Private Agent Server socket for %i
+
+[Socket]
+ListenStream=/run/ai-canvas/%i.sock
+SocketUser=root
+SocketGroup=ai-portal
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

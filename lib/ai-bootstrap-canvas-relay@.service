@@ -1,0 +1,12 @@
+[Unit]
+Description=Agent Server transport for %i
+Requires=ai-bootstrap-canvas-relay@%i.socket
+After=ai-bootstrap-canvas-relay@%i.socket
+
+[Service]
+User=aisbx-%i
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/canvas-relay.py
+Restart=on-failure
+UMask=0077
+StandardOutput=null
+StandardError=null

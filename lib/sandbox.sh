@@ -164,16 +164,7 @@ base_archive() {
 }
 
 gateway_address() {
-    python3 -I -c '
-import ipaddress,json,subprocess
-routes=json.loads(subprocess.check_output(["ip","-4","-j","route","show","default"]))
-for route in routes:
- for interface in json.loads(subprocess.check_output(["ip","-4","-j","address","show","dev",route["dev"]])):
-  for address in interface["addr_info"]:
-   if address["scope"] == "global":
-    print(ipaddress.IPv4Address(address["local"])); raise SystemExit
-raise SystemExit("No host IPv4 address for the model gateway")
-'
+    python3 -I /usr/local/libexec/ai-bootstrap/gateway-address.py
 }
 
 configure_qwen() {
@@ -285,6 +276,51 @@ github_create() {
     ' _ "$repository"
 }
 
+configure_canvas() {
+    [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
+    [[ -f /etc/ai-bootstrap/model-gateway.json ]] || die 'configure the model gateway before Canvas'
+    exec 9>/run/lock/ai-bootstrap-sandbox.lock
+    flock 9
+    project_account
+    configure_qwen
+    source /etc/ai-bootstrap/sandbox-release.env
+    local generation previous
+    generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py | cut -d ' ' -f 1)"
+    previous=$(as_project podman exec project cat /opt/ai-canvas-control/generation 2>/dev/null || true)
+    as_project podman exec project test -d /workspace/repo/.git
+    as_project podman exec --interactive project bash -s -- "$AGENT_SERVER_VERSION" \
+        < /usr/local/libexec/ai-bootstrap/canvas-setup.sh
+    python3 -I - "$project" <<'PY'
+import grp,json,os,pathlib,secrets,sys,uuid
+path=pathlib.Path('/var/lib/ai-canvas/connections')/(sys.argv[1]+'.json')
+settings=json.loads(path.read_text()) if path.exists() else {'key':secrets.token_urlsafe(32)}
+if 'conversation_id' not in settings:
+    settings['conversation_id']=str(uuid.uuid4())
+    path.write_text(json.dumps(settings))
+path.chmod(0o640)
+os.chown(path,0,grp.getgrnam('ai-portal').gr_gid)
+PY
+    as_project podman exec project install -d -m 0700 /opt/ai-canvas-control /root/.config/ai-bootstrap
+    as_project podman cp /usr/local/libexec/ai-bootstrap/canvas-agent.py project:/opt/ai-canvas-control/agent.py
+    # The host's root-owned record is not readable by the sandbox user. Send it on stdin.
+    as_project podman exec --interactive project sh -c 'umask 077; cat > /root/.config/ai-bootstrap/canvas.json' \
+        < "/var/lib/ai-canvas/connections/$project.json"
+    as_project systemctl --user daemon-reload
+    as_project systemctl --user enable ai-bootstrap-agent.service
+    if [[ $previous != "$generation" ]]; then
+        as_project systemctl --user restart ai-bootstrap-agent.service
+    else
+        as_project systemctl --user start ai-bootstrap-agent.service
+    fi
+    if ! as_project podman exec project python3 -I /opt/ai-canvas-control/agent.py configure; then
+        # A retry must also repair a running but unresponsive server.
+        as_project systemctl --user restart ai-bootstrap-agent.service
+        as_project podman exec project python3 -I /opt/ai-canvas-control/agent.py configure
+    fi
+    printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-canvas-control/generation'
+    systemctl enable --now "ai-bootstrap-canvas-relay@$project.socket"
+}
+
 github_delete() {
     [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 ]] || die 'invalid GitHub project'
     local mount_unit
@@ -298,6 +334,11 @@ github_delete() {
     fi
     if [[ -f /var/lib/ai-models/gateway.sqlite3 ]]; then
         runuser -u ai-models -- python3 -I /usr/local/libexec/ai-bootstrap/model_gateway.py revoke "$project"
+    fi
+    if [[ -f /etc/systemd/system/ai-bootstrap-canvas-relay@.socket ]]; then
+        systemctl disable --now "ai-bootstrap-canvas-relay@$project.socket"
+        systemctl stop "ai-bootstrap-canvas-relay@$project.service"
+        rm -f -- "/var/lib/ai-canvas/connections/$project.json"
     fi
     if ! id "$user" >/dev/null 2>&1; then
         [[ ! -e $project_dir/disk.ext4 ]] && ! mountpoint -q -- "$disk" || die 'project account is missing'
@@ -329,6 +370,7 @@ case $action in
         ;;
     github-create) github_create "$@" ;;
     github-delete) github_delete "$@" ;;
+    canvas-setup) configure_canvas "$@" ;;
     resources)
         [[ $# == 0 ]] || die 'resources expects one project name'
         project_account

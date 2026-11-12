@@ -253,6 +253,7 @@ configure_sandbox() {
     install -d -m 0755 /etc/systemd/user
     publish "$release/release.env" "$etc/sandbox-release.env" 600
     publish "$release/lib/sandbox.sh" /usr/local/sbin/ai-sandbox 755
+    publish "$release/lib/gateway-address.py" "$libexec/gateway-address.py" 644
     publish "$release/lib/ai-bootstrap-sandbox.service" /etc/systemd/user/ai-bootstrap-sandbox.service 644
     publish "$work/sandbox-settings" "$etc/sandbox-settings" 600
     publish "$work/sandbox-resources" "$etc/sandbox-resources" 600
@@ -304,7 +305,42 @@ portal_admin() {
 }
 
 portal_packages() {
-    ensure_packages gunicorn python3-cryptography python3-qrcode
+    ensure_packages gunicorn python3-cryptography python3-qrcode python3-aiohttp
+}
+
+configure_canvas() {
+    install -d -m 0755 /opt/ai-canvas
+    if [[ ! -f /opt/ai-canvas/version || $(cat /opt/ai-canvas/version) != "$AGENT_CANVAS_VERSION" ]]; then
+        quiet 'could not download pinned Canvas' curl -q --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' --output "$work/canvas.tgz" \
+            "https://registry.npmjs.org/@openhands/agent-canvas/-/agent-canvas-$AGENT_CANVAS_VERSION.tgz"
+        printf '%s  %s\n' "$AGENT_CANVAS_SHA256" "$work/canvas.tgz" | sha256sum --check --status ||
+            fail 'Canvas archive checksum mismatch'
+        install -d -m 0755 "$work/canvas"
+        tar -xzf "$work/canvas.tgz" -C "$work/canvas" --no-same-owner package/build
+        cp -a "$work/canvas/package/build/." /opt/ai-canvas/build.new/
+        chmod -R a+rX /opt/ai-canvas/build.new
+        # Keep the previous frontend until extraction and integrity checks have succeeded.
+        rm -rf -- /opt/ai-canvas/build.previous
+        if [[ -d /opt/ai-canvas/build ]]; then mv /opt/ai-canvas/build /opt/ai-canvas/build.previous; fi
+        mv /opt/ai-canvas/build.new /opt/ai-canvas/build
+        printf '%s\n' "$AGENT_CANVAS_VERSION" > /opt/ai-canvas/version
+    fi
+    install -d -m 0750 -o root -g ai-portal /var/lib/ai-canvas /var/lib/ai-canvas/connections
+    local file unit
+    for file in canvas.py canvas-agent.py canvas-relay.py canvas-setup.sh; do
+        publish "$release/lib/$file" "$libexec/$file" 644
+    done
+    publish "$release/lib/canvas-exec" "$libexec/canvas-exec" 755
+    publish "$release/lib/nginx-canvas.conf" "$etc/nginx-canvas.conf" 644
+    publish "$release/lib/ai-bootstrap-agent.service" /etc/systemd/user/ai-bootstrap-agent.service 644
+    for unit in ai-bootstrap-canvas.socket ai-bootstrap-canvas.service \
+        ai-bootstrap-canvas-relay@.socket ai-bootstrap-canvas-relay@.service; do
+        publish "$release/lib/$unit" "/etc/systemd/system/$unit" 644
+    done
+    systemctl daemon-reload
+    systemctl enable --now ai-bootstrap-canvas.socket
+    systemctl try-restart ai-bootstrap-canvas.service
 }
 
 configure_github_projects() {
@@ -327,6 +363,7 @@ configure_github_projects() {
 configure_portal() {
     service_account ai-portal "$portal_state"
     install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
+    configure_canvas
     configure_github_projects
     if [[ ! -e $etc/portal.key ]]; then
         [[ ! -e $portal_state/portal.sqlite3 ]] || fail 'restore the portal encryption key'

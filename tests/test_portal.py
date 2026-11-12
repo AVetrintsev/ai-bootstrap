@@ -129,6 +129,27 @@ class PortalTest(unittest.TestCase):
             self.assertEqual(status, 303)
             self.assertEqual(headers["Location"], "/projects")
 
+    def test_canvas_open_is_available_only_after_connection_and_failure_can_be_retried(self):
+        cookie, _, _ = self.enroll()
+        project = {"id": 7, "name": "owner/private", "sandbox": "gh-7", "state": "ready"}
+        with patch.object(portal, "github_request", return_value={"connected": True, "projects": [project]}):
+            for state in ("pending", "connecting", "failed"):
+                project["canvas"] = state
+                status, _, page = self.request("/projects", cookie=cookie)
+                self.assertEqual(status, 200)
+                self.assertNotIn(b'href="/canvas/open/gh-7"', page)
+            self.assertIn('Подключение Canvas не завершено'.encode(), page)
+            self.assertIn(b'action="/projects/canvas"', page)
+            csrf = re.search(rb'name="csrf" value="([^"]+)"', page).group(1).decode()
+            project["canvas"] = "ready"
+            self.assertIn(b'href="/canvas/open/gh-7"', self.request("/projects", cookie=cookie)[2])
+        with patch.object(portal, "github_request", return_value={}) as api:
+            self.assertEqual(self.request("/projects/canvas", form={"repository": "7"})[0], 404)
+            self.assertEqual(self.request("/projects/canvas", cookie=cookie, form={"repository": "7"})[0], 403)
+            self.assertEqual(self.request("/projects/canvas", cookie=cookie,
+                                          form={"repository": "7", "csrf": csrf})[0], 303)
+            api.assert_called_once_with("canvas", repository=7)
+
     def test_secure_transport_marks_cookie_secure(self):
         self.portal = self.new_portal(secure=True)
         self.assertTrue(self.activation("https://portal.example").startswith("https://portal.example/"))

@@ -1,0 +1,21 @@
+#!/usr/bin/python3 -I
+"""Run a project-owned Agent Server through that user's existing container."""
+import os
+import pwd
+import re
+import subprocess
+import sys
+
+account = pwd.getpwuid(os.getuid()).pw_name
+if not re.fullmatch(r"aisbx-gh-[1-9][0-9]{0,18}", account):
+    sys.exit("Expected a GitHub sandbox account")
+environment = dict(os.environ, XDG_RUNTIME_DIR=f"/run/user/{os.getuid()}")
+arguments = ["podman", "exec", "--interactive"]
+if sys.argv[1:] == ["server"]:
+    host = subprocess.check_output(["python3", "-I", "/usr/local/libexec/ai-bootstrap/gateway-address.py"], text=True).strip()
+    arguments += ["--env", f"AI_GATEWAY_HOST={host}", "project", "python3", "-I", "/opt/ai-canvas-control/agent.py", "run"]
+elif sys.argv[1:] == ["stop"]:
+    arguments += ["project", "python3", "-I", "/opt/ai-canvas-control/agent.py", "stop"]
+else:
+    sys.exit("Expected server or stop")
+os.execvpe("podman", arguments, environment)

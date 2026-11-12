@@ -173,6 +173,10 @@ class Projects:
                 UPDATE project SET state = 'failed' WHERE state = 'creating';
                 UPDATE project SET state = 'delete_failed' WHERE state = 'deleting';
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(project)")}
+            if "canvas" not in columns:
+                db.execute("ALTER TABLE project ADD COLUMN canvas TEXT NOT NULL DEFAULT 'pending'")
+            db.execute("UPDATE project SET canvas = 'failed' WHERE canvas = 'connecting'")
 
     def db(self):
         return sqlite3.connect(self.state / "projects.sqlite3")
@@ -202,11 +206,11 @@ class Projects:
 
     def list(self):
         with closing(self.db()) as db:
-            rows = db.execute("SELECT id, name, state FROM project ORDER BY name COLLATE NOCASE").fetchall()
+            rows = db.execute("SELECT id, name, state, canvas FROM project ORDER BY name COLLATE NOCASE").fetchall()
         return {
             "connected": self.connection() is not None,
-            "projects": [{"id": key, "name": name, "state": state, "sandbox": f"gh-{key}"}
-                         for key, name, state in rows],
+            "projects": [{"id": key, "name": name, "state": state, "sandbox": f"gh-{key}", "canvas": canvas}
+                         for key, name, state, canvas in rows],
         }
 
     def repositories(self):
@@ -229,22 +233,49 @@ class Projects:
             if row and row[0] in ("creating", "ready"):
                 return {}
             name = selected["name"]
-            db.execute("INSERT OR REPLACE INTO project VALUES (?, ?, 'creating')", (repository, name))
+            db.execute("INSERT OR REPLACE INTO project (id, name, state) VALUES (?, ?, 'creating')", (repository, name))
         self.jobs.submit(self.run_job, "create", repository, name)
         return {}
 
     def delete(self, repository):
         with self.lock, closing(self.db()) as db, db:
-            row = db.execute("SELECT state FROM project WHERE id = ?", (repository,)).fetchone()
+            row = db.execute("SELECT state, canvas FROM project WHERE id = ?", (repository,)).fetchone()
             if not row:
                 raise ProjectError(INVALID_PROJECT)
             if row[0] == "deleting":
                 return {}
-            if row[0] == "creating":
+            if row[0] == "creating" or row[1] == "connecting":
                 raise ProjectError("Дождитесь окончания подготовки проекта.")
             db.execute("UPDATE project SET state = 'deleting' WHERE id = ?", (repository,))
         self.jobs.submit(self.run_job, "delete", repository, None)
         return {}
+
+    def connect_canvas(self, repository):
+        with self.lock, closing(self.db()) as db, db:
+            row = db.execute("SELECT state, canvas FROM project WHERE id = ?", (repository,)).fetchone()
+            if not row or row[0] != "ready":
+                raise ProjectError(INVALID_PROJECT)
+            if row[1] == "connecting":
+                return {}
+            db.execute("UPDATE project SET canvas = 'connecting' WHERE id = ?", (repository,))
+        self.jobs.submit(self.run_canvas_job, repository)
+        return {}
+
+    def canvas_failed(self, repository):
+        with self.lock, closing(self.db()) as db, db:
+            db.execute("UPDATE project SET canvas = 'failed' WHERE id = ? AND canvas = 'ready'", (repository,))
+        return {}
+
+    def run_canvas_job(self, repository):
+        try:
+            self.sandbox("canvas", f"gh-{repository}", None)
+        except (OSError, ValueError, ProjectError):
+            state = "failed"
+            print(f"Project gh-{repository}: Canvas connection failed", file=sys.stderr)
+        else:
+            state = "ready"
+        with self.lock, closing(self.db()) as db, db:
+            db.execute("UPDATE project SET canvas = ? WHERE id = ?", (state, repository))
 
     def run_job(self, action, repository, name):
         try:
@@ -257,8 +288,12 @@ class Projects:
         with self.lock, closing(self.db()) as db, db:
             if state:
                 db.execute("UPDATE project SET state = ? WHERE id = ?", (state, repository))
+                if action == "create" and state == "ready":
+                    db.execute("UPDATE project SET canvas = 'connecting' WHERE id = ?", (repository,))
             else:
                 db.execute("DELETE FROM project WHERE id = ?", (repository,))
+        if action == "create" and state == "ready":
+            self.run_canvas_job(repository)
 
 
 def credential(state, app_factory, username, path):
@@ -312,6 +347,10 @@ def portal_request(projects, data):
             return projects.add(repository)
         if action == "delete":
             return projects.delete(repository)
+        if action == "canvas":
+            return projects.connect_canvas(repository)
+        if action == "canvas-failed":
+            return projects.canvas_failed(repository)
     raise ProjectError(INVALID_PROJECT)
 
 
@@ -356,7 +395,11 @@ def main():
 
     mode = sys.argv[1]
     if mode == "portal":
-        serve(Projects(STATE, app, provision))
+        projects = Projects(STATE, app, provision)
+        for project in projects.list()["projects"]:
+            if project["state"] == "ready" and project["canvas"] == "pending":
+                projects.connect_canvas(project["id"])
+        serve(projects)
         return
     try:
         result = credential_request(app)
