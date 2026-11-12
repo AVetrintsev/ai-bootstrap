@@ -280,6 +280,8 @@ class Projects:
     def run_job(self, action, repository, name):
         try:
             self.sandbox(action, f"gh-{repository}", name)
+            if action == 'create':
+                self.sandbox('tools', f'gh-{repository}', None)
         except (OSError, ValueError, ProjectError):
             state = "failed" if action == "create" else "delete_failed"
             print(f"Project gh-{repository}: {action} failed", file=sys.stderr)

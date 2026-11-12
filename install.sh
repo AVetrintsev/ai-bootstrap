@@ -255,6 +255,10 @@ configure_sandbox() {
     publish "$release/lib/sandbox.sh" /usr/local/sbin/ai-sandbox 755
     publish "$release/lib/gateway-address.py" "$libexec/gateway-address.py" 644
     publish "$release/lib/ai-bootstrap-sandbox.service" /etc/systemd/user/ai-bootstrap-sandbox.service 644
+    publish "$release/lib/project-tools-setup.sh" "$libexec/project-tools-setup.sh" 644
+    publish "$release/lib/project-graph.py" "$libexec/project-graph.py" 644
+    publish "$release/lib/project-tools-exec" "$libexec/project-tools-exec" 755
+    publish "$release/lib/ai-bootstrap-project-tools.service" /etc/systemd/user/ai-bootstrap-project-tools.service 644
     publish "$work/sandbox-settings" "$etc/sandbox-settings" 600
     publish "$work/sandbox-resources" "$etc/sandbox-resources" 600
     publish "$release/lib/sandbox-resources.sh" "$libexec/sandbox-resources.sh" 755

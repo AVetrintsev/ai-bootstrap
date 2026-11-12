@@ -1,0 +1,14 @@
+[Unit]
+Description=Persistent code graph in the project sandbox
+Requires=ai-bootstrap-sandbox.service
+After=ai-bootstrap-sandbox.service
+
+[Service]
+ExecStart=/usr/local/libexec/ai-bootstrap/project-tools-exec run
+ExecStop=/usr/local/libexec/ai-bootstrap/project-tools-exec stop
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

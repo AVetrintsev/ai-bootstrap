@@ -17,7 +17,14 @@ for profile in ('chatgpt', 'api'):
         'initialize_timeout_sec = 5\n')
     (home / 'config.toml').write_text(
         'cli_auth_credentials_store = "file"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
-        '[features]\nmulti_agent = false\n')
+        '[features]\nmulti_agent = false\n'
+        '[mcp_servers.serena]\ncommand = "/opt/ai-serena/bin/serena"\n'
+        'args = ["start-mcp-server", "--project", "/workspace/repo", "--context", "ide", '
+        '"--open-web-dashboard", "false", "--enable-gui-log-window", "false"]\n'
+        'cwd = "/workspace/repo"\nenvironment_id = "project"\nstartup_timeout_sec = 120\ntool_timeout_sec = 180\n'
+        '[mcp_servers.codegraphcontext]\ncommand = "/usr/bin/python3"\n'
+        'args = ["-I", "/opt/ai-project-tools/graph.py", "client"]\n'
+        'cwd = "/workspace/repo"\nenvironment_id = "project"\nstartup_timeout_sec = 120\ntool_timeout_sec = 180\n')
     if profile == 'chatgpt':
         auth = home / 'auth.json'
         if not auth.is_symlink():
