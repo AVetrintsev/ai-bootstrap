@@ -378,6 +378,7 @@ configure_canvas() {
     local generation previous
     generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py \
         /usr/local/libexec/ai-bootstrap/project-tools-setup.sh \
+        /usr/local/libexec/ai-bootstrap/qwen-launcher \
         /usr/local/libexec/ai-bootstrap/project-graph.py /usr/local/libexec/ai-bootstrap/codegraph-worker.py \
         "$project_dir/codex-generation" | sha256sum | cut -d ' ' -f 1)"
     previous=$(as_project podman exec project cat /opt/ai-canvas-control/generation 2>/dev/null || true)

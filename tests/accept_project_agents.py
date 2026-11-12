@@ -42,7 +42,8 @@ def prompt_agent(prompt, log):
             except ValueError:
                 pass
         messages.put({'error': 'Agent exited'})
-    threading.Thread(target=read, daemon=True).start()
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
     def send(message):
         process.stdin.write(json.dumps({'jsonrpc': '2.0', **message}) + '\n')
         process.stdin.flush()
@@ -73,6 +74,7 @@ def prompt_agent(prompt, log):
         except subprocess.TimeoutExpired:
             process.terminate()
             process.wait(timeout=15)
+        reader.join(timeout=15)
 
 
 def has_symbol(value):
