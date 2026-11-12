@@ -102,6 +102,8 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
                 ('environment/add', {'id': 'local'}), ('fs/readFile', {'path': '/var/lib/ai-codex/auth/auth.json'}),
                 ('session/new', {'cwd': '/var/lib/ai-codex', 'mcpServers': []}),
                 ('session/new', {'cwd': '/workspace/repo', 'mcpServers': [{'command': 'sh'}]}),
+                ('session/new', ['invalid']), ('session/prompt', {'prompt': [None]}),
+                (['invalid-method'], {}),
             ]
             for key, (method, params) in enumerate(requests):
                 writer.write(json.dumps({'id': key, 'method': method, 'params': params}).encode() + b'\n')

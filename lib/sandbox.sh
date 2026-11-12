@@ -279,7 +279,7 @@ github_create() {
 configure_codex() {
     [[ -x /opt/ai-codex/bin/codex ]] || die 'install Codex on the platform before connecting Canvas'
     source /etc/ai-bootstrap/sandbox-release.env
-    local installed
+    local installed generation previous
     installed=$(as_project podman exec project cat /opt/ai-codex/ai-bootstrap-version 2>/dev/null || true)
     if [[ $installed != "$CODEX_VERSION:$CODEX_SHA256" ]]; then
         as_project podman exec project sh -eu -c 'rm -rf /opt/ai-codex.next; install -d -m 0755 /opt/ai-codex.next'
@@ -293,8 +293,21 @@ configure_codex() {
     fi
     as_project podman cp /usr/local/libexec/ai-bootstrap/codex-client project:/usr/local/bin/codex
     as_project podman exec project chmod 0755 /usr/local/bin/codex
+    if [[ -f /var/lib/ai-codex/projects/$project/chatgpt/auth.lock &&
+          ! -L /var/lib/ai-codex/projects/$project/chatgpt/auth.lock ]]; then
+        systemctl stop "ai-bootstrap-codex-project@$project.service"
+    fi
     runuser -u ai-codex -- python3 -I /usr/local/libexec/ai-bootstrap/codex-project.py "$project"
+    generation=$(sha256sum /usr/local/libexec/ai-bootstrap/codex_service.py \
+        /usr/local/libexec/ai-bootstrap/codex-executor.py /usr/local/libexec/ai-bootstrap/codex-project.py \
+        /etc/systemd/system/ai-bootstrap-codex-project@.service \
+        /etc/systemd/system/ai-bootstrap-codex-executor@.service /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
+    previous=$(cat "$project_dir/codex-generation" 2>/dev/null || true)
     systemctl enable --now "ai-bootstrap-codex-executor@$project.socket" "ai-bootstrap-codex-project@$project.socket"
+    if [[ $previous != "$generation" ]]; then
+        systemctl try-restart "ai-bootstrap-codex-project@$project.service" "ai-bootstrap-codex-executor@$project.service"
+        printf '%s' "$generation" > "$project_dir/codex-generation"
+    fi
 }
 
 configure_canvas() {

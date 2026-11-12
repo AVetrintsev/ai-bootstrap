@@ -258,7 +258,7 @@ class ProjectSession:
         if selected_profile(self.state) != self.profile:
             raise ValueError('Способ оплаты изменён. Создайте новый разговор.')
         parts = params.get('prompt', [])
-        if not parts or any(p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in parts):
+        if not isinstance(parts, list) or not parts or any(not isinstance(p, dict) or p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in parts):
             raise ValueError('Поддерживаются текстовые сообщения.')
         await self.executor()
         result = await self.server.call('turn/start', {'threadId': self.session,
@@ -302,6 +302,8 @@ class ProjectSession:
     async def handle(self, message):
         key, method, params = message.get('id'), message.get('method'), message.get('params') or {}
         try:
+            if not isinstance(method, str) or (key is not None and type(key) not in (str, int)):
+                raise ValueError('Недействительный запрос.')
             if not isinstance(params, dict):
                 raise ValueError('Ожидается объект параметров.')
             if method == 'initialize':
@@ -315,7 +317,7 @@ class ProjectSession:
                 if self.turn and params.get('sessionId') == self.session:
                     await self.server.call('turn/interrupt', {'threadId': self.session, 'turnId': self.turn})
                 return
-            elif method == 'session/set_mode' and params.get('modeId') == 'project' and params.get('sessionId') == self.session:
+            elif method == 'session/set_mode' and self.session and params.get('modeId') == 'project' and params.get('sessionId') == self.session:
                 result = {}
             else:
                 raise ValueError('Этот метод недоступен из песочницы.')
@@ -323,6 +325,9 @@ class ProjectSession:
                 await self.send({'id': key, 'result': result})
         except (ValueError, CodexError, OSError, KeyError, asyncio.TimeoutError) as error:
             kind = error.kind if isinstance(error, CodexError) else 'unavailable'
+            if method in ('session/new', 'session/load') and self.server and not self.session:
+                await self.server.close()
+                self.server = None
             if key is not None:
                 await self.send({'id': key, 'error': {'code': -32000, 'message': str(error) if isinstance(error, (CodexError, ValueError)) else MESSAGES[kind], 'data': {'kind': kind}}})
 

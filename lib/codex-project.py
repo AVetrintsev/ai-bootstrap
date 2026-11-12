@@ -1,5 +1,4 @@
 """Provision trusted project configuration; run as ai-codex by the installer."""
-import json
 from pathlib import Path
 import re
 import sys
@@ -8,6 +7,7 @@ project = sys.argv[1]
 if not re.fullmatch(r'gh-[1-9][0-9]{0,18}', project):
     sys.exit('Invalid project')
 root = Path('/var/lib/ai-codex')
+(root / 'auth' / 'auth.lock').touch(mode=0o600, exist_ok=True)
 for profile in ('chatgpt', 'api'):
     home = root / 'projects' / project / profile
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -24,3 +24,9 @@ for profile in ('chatgpt', 'api'):
             if auth.exists():
                 sys.exit('Unexpected project auth file; refusing to replace it')
             auth.symlink_to(root / 'auth' / 'auth.json')
+        lock = home / 'auth.lock'
+        if not lock.is_symlink():
+            # The caller stops this project's app-server before migrating a lock.
+            if lock.exists():
+                lock.unlink()
+            lock.symlink_to(root / 'auth' / 'auth.lock')

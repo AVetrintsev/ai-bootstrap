@@ -82,9 +82,9 @@ try:
 except urllib.error.HTTPError as error:
     if error.code != 404:
         raise
-    active = request("/api/agent-profiles")["active_agent_profile_id"]
+    qwen = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "qwen-code")
     request("/api/conversations", "POST", {
-        "conversation_id": settings["conversation_id"], "agent_profile_id": active,
+        "conversation_id": settings["conversation_id"], "agent_profile_id": qwen["id"],
         "workspace": {"kind": "LocalWorkspace", "working_dir": "/workspace/repo"},
         "worktree": False, "autotitle": False,
     })

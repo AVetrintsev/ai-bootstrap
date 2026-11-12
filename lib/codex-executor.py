@@ -16,29 +16,37 @@ async def main():
 
     async def connect(reader, writer):
         async with slots:
-            child = await asyncio.create_subprocess_exec(
-                'podman', 'exec', '--interactive', '--workdir', '/workspace/repo',
-                '--env', 'CODEX_HOME=/tmp/ai-codex-executor', '--env', 'TOKIO_WORKER_THREADS=2',
-                'project', '/opt/ai-codex/bin/codex', 'exec-server', '--listen', 'stdio',
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL, env=environment)
-
-            async def copy(source, target):
-                while data := await source.read(65536):
-                    target.write(data)
-                    await target.drain()
-
-            tasks = [asyncio.create_task(copy(reader, child.stdin)), asyncio.create_task(copy(child.stdout, writer))]
+            child = None
+            tasks = []
             try:
+                child = await asyncio.create_subprocess_exec(
+                    'podman', 'exec', '--interactive', '--workdir', '/workspace/repo',
+                    '--env', 'CODEX_HOME=/tmp/ai-codex-executor', '--env', 'TOKIO_WORKER_THREADS=2',
+                    'project', '/opt/ai-codex/bin/codex', 'exec-server', '--listen', 'stdio',
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL, env=environment)
+
+                async def copy(source, target):
+                    while data := await source.read(65536):
+                        target.write(data)
+                        await target.drain()
+
+                tasks = [asyncio.create_task(copy(reader, child.stdin)), asyncio.create_task(copy(child.stdout, writer))]
                 await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            except OSError:
+                pass
             finally:
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 writer.close()
-                if child.returncode is None:
-                    child.terminate()
-                await child.wait()
+                if child is not None and child.returncode is None:
+                    child.stdin.close()
+                    try:
+                        await asyncio.wait_for(child.wait(), 5)
+                    except asyncio.TimeoutError:
+                        child.kill()
+                        await child.wait()
 
     server = await asyncio.start_unix_server(connect, sock=socket.socket(fileno=3))
     async with server:

@@ -372,6 +372,13 @@ configure_codex() {
     systemctl daemon-reload
     systemctl enable --now ai-bootstrap-codex.socket
     systemctl try-restart ai-bootstrap-codex.service
+    local connection project
+    for connection in /var/lib/ai-canvas/connections/gh-*.json; do
+        [[ -f $connection ]] || continue
+        project=${connection##*/}
+        project=${project%.json}
+        /usr/local/sbin/ai-sandbox canvas-setup "$project"
+    done
 }
 
 configure_github_projects() {
