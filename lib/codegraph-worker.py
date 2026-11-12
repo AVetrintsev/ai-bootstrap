@@ -7,16 +7,21 @@ from codegraphcontext.core.database_falkordb import FalkorDBManager
 from codegraphcontext.tools.graph_builder import GraphBuilder
 import codegraphcontext.server as cgc_server
 
+FILE_SYMBOL_LABELS = ('Function', 'Class', 'Trait', 'Variable', 'Interface', 'Macro',
+                     'Struct', 'Enum', 'Union', 'Record', 'Property', 'Mixin',
+                     'Extension', 'Object', 'EnumMember', 'Parameter')
+
 
 class ProjectGraphBuilder(GraphBuilder):
     def delete_file_from_graph(self, path):
         super().delete_file_from_graph(path)
         # CGC 0.6.13's OPTIONAL MATCH delete can leave file-owned symbols in
-        # FalkorDB after deleting their File node. Their path is the ownership key.
+        # FalkorDB after deleting their File node. Limit the cleanup to CGC's
+        # per-file symbols; shared symbols and Maven/Gradle modules have other owners.
         with self.driver.session() as session:
-            session.run('MATCH (n {path: $path}) '
-                        'WHERE NOT n:Module AND NOT n:DbTable AND NOT n:ExternalClass '
-                        'DETACH DELETE n', path=str(Path(path).resolve()))
+            labels = ' OR '.join(f'n:{label}' for label in FILE_SYMBOL_LABELS)
+            session.run(f'MATCH (n {{path: $path}}) WHERE {labels} DETACH DELETE n',
+                        path=str(Path(path).resolve()))
 
 
 class ProjectWatcher(CodeWatcher):
