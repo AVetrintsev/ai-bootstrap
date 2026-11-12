@@ -1,0 +1,12 @@
+[Unit]
+Description=Codex executor transport into %i
+Requires=ai-bootstrap-codex-executor@%i.socket
+After=ai-bootstrap-codex-executor@%i.socket
+
+[Service]
+User=aisbx-%i
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/codex-executor.py
+UMask=0077
+KillMode=control-group
+StandardOutput=null
+StandardError=null

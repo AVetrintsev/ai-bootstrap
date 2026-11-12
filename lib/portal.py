@@ -315,6 +315,15 @@ def github_request(action, **fields):
             return json.loads(reply.readline(2 * 1024 * 1024))
 
 
+def codex_request(action, *, socket_path="/run/ai-bootstrap-codex.sock", **fields):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(30)
+        connection.connect(socket_path)
+        connection.sendall(json.dumps({"action": action, **fields}).encode() + b"\n")
+        with connection.makefile("rb") as reply:
+            return json.loads(reply.readline(65536))
+
+
 def respond(start_response, status, body="", content_type="text/plain; charset=utf-8", headers=()):
     start_response(
         f"{status.value} {status.phrase}",
@@ -375,9 +384,10 @@ def browser_row(browser, current_hash, csrf):
 
 
 class Portal:
-    def __init__(self, state, key, *, clock=time.time, secure=False):
+    def __init__(self, state, key, *, clock=time.time, secure=False, codex_socket="/run/ai-bootstrap-codex.sock"):
         self.owner = OwnerAccess(state, key, clock)
         self.secure = secure
+        self.codex_socket = codex_socket
 
     def __call__(self, environ, start_response):
         path = environ["PATH_INFO"]
@@ -400,6 +410,8 @@ class Portal:
             if path in ("/projects", "/projects/add", "/projects/delete", "/projects/canvas", "/github/connect"):
                 if self.owner.has_session(session):
                     return self.projects(environ, start_response, session, path, method)
+            if path in ("/codex", "/codex/login", "/codex/profile") and self.owner.has_session(session):
+                return self.codex(environ, start_response, session, path, method)
             if method == "GET" and self.owner.has_session(session):
                 if path == "/api/status":
                     return respond(start_response, HTTPStatus.OK, '{"status":"ok"}\n', "application/json")
@@ -446,12 +458,58 @@ class Portal:
         rows = "".join(browser_row(browser, token_hash, csrf) for browser in browsers)
         page = html_page("ai-bootstrap", f"""
 <p><a href="/projects">Проекты</a></p>
+<p><a href="/codex">Подключение Codex</a></p>
 <p><a href="{link}">Зарегистрировать браузер</a></p>
 <h2>Зарегистрированные браузеры</h2>
 <table><thead><tr><th>Имя</th><th>Регистрация</th><th>Последняя активность</th>
 <th>Срок действия</th><th>Управление</th></tr></thead><tbody>{rows}</tbody></table>""")
         headers = (self.cookie(session),) if renew else ()
         return respond(start_response, HTTPStatus.OK, page, "text/html; charset=utf-8", headers)
+
+    def codex(self, environ, start_response, session, path, method):
+        action = {("GET", "/codex"): "status", ("POST", "/codex/login"): "login",
+                  ("POST", "/codex/profile"): "profile"}.get((method, path))
+        if action is None:
+            return respond(start_response, HTTPStatus.NOT_FOUND)
+        csrf = csrf_token(session)
+        fields = {}
+        if method == "POST":
+            form = submitted_form(environ, max_fields=3, max_length=1024)
+            if not hmac.compare_digest(form.get("csrf", "").encode(), csrf.encode()):
+                return respond(start_response, HTTPStatus.FORBIDDEN, "Недействительная форма.\n")
+            if action == "profile":
+                if form.get("profile") not in ("chatgpt", "api") or form.get("confirm") != "yes":
+                    return respond(start_response, HTTPStatus.BAD_REQUEST, "Подтвердите выбор способа оплаты.\n")
+                fields["profile"] = form["profile"]
+        try:
+            result = codex_request(action, socket_path=self.codex_socket, **fields)
+        except (OSError, ValueError):
+            result = {"error": "Служба Codex недоступна. Повторите попытку позже."}
+        hidden = f'<input type="hidden" name="csrf" value="{csrf}">'
+        content = '<p><a href="/">Главная</a> · <a href="/projects">Проекты</a></p>'
+        if "error" in result:
+            content += f'<p role="alert">{escape(result["error"])}</p>'
+            return respond(start_response, HTTPStatus.SERVICE_UNAVAILABLE, html_page("Codex", content), "text/html; charset=utf-8")
+        labels = {"login_required": "Требуется вход в ChatGPT.", "limit_reached": "Лимит подписки исчерпан. Дождитесь обновления лимита или явно выберите платный API.",
+                  "ready": "Подписка ChatGPT подключена.", "unavailable": "Не удалось проверить подписку. Повторите попытку позже."}
+        content += f'<p>{labels.get(result.get("status"), labels["unavailable"])}</p>'
+        profile = "Подписка ChatGPT" if result.get("profile", "chatgpt") == "chatgpt" else "Платный API"
+        content += f'<p>Для новых разговоров: <strong>{profile}</strong>.</p>'
+        login = result.get("login")
+        if login:
+            content += ('<p>Откройте <a href="https://auth.openai.com/codex/device" target="_blank" rel="noopener noreferrer">вход в ChatGPT</a> '
+                        f'и введите код <strong>{escape(login["userCode"])}</strong>. Затем обновите эту страницу.</p>')
+        content += f'<form method="post" action="/codex/login">{hidden}<button>Войти в ChatGPT</button></form>'
+        content += '<p>Переключение применяется к новым разговорам. Автоматического перехода на платный API нет.</p>'
+        options = [('chatgpt', 'Использовать подписку ChatGPT')]
+        if result.get("api_configured"):
+            options.append(('api', 'Использовать платный API'))
+        for value, label in options:
+            content += (f'<form method="post" action="/codex/profile">{hidden}'
+                        f'<input type="hidden" name="profile" value="{value}">'
+                        '<label><input type="checkbox" name="confirm" value="yes" required> Подтверждаю смену способа оплаты</label> '
+                        f'<button>{label}</button></form>')
+        return respond(start_response, HTTPStatus.OK, html_page("Codex", content), "text/html; charset=utf-8")
 
     def projects(self, environ, start_response, session, path, method):
         actions = {
@@ -530,7 +588,8 @@ class Portal:
         if project["state"] == "ready":
             connection = project.get("canvas", "pending")
             if connection == "ready":
-                canvas = f'<p><a href="/canvas/open/{escape(project["sandbox"])}">Открыть</a></p>'
+                canvas = (f'<p><a href="/canvas/open/{escape(project["sandbox"])}">Открыть</a> '
+                          f'· <a href="/canvas/open/{escape(project["sandbox"])}?agent=qwen">Qwen Code</a></p>')
             elif connection == "connecting":
                 canvas = "<p>Подключение Canvas… Обновите страницу через минуту.</p>"
             else:

@@ -1,0 +1,19 @@
+[Unit]
+Description=Trusted Codex process for project %i
+Requires=ai-bootstrap-codex-project@%i.socket
+After=ai-bootstrap-codex-project@%i.socket
+
+[Service]
+User=ai-codex
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/codex_service.py %i
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ai-codex
+MemoryMax=512M
+TasksMax=192
+KillMode=control-group
+StandardOutput=null
+StandardError=null

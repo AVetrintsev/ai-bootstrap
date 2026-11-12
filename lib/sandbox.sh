@@ -276,6 +276,40 @@ github_create() {
     ' _ "$repository"
 }
 
+configure_codex() {
+    [[ -x /opt/ai-codex/bin/codex ]] || die 'install Codex on the platform before connecting Canvas'
+    source /etc/ai-bootstrap/sandbox-release.env
+    local installed generation previous
+    installed=$(as_project podman exec project cat /opt/ai-codex/ai-bootstrap-version 2>/dev/null || true)
+    if [[ $installed != "$CODEX_VERSION:$CODEX_SHA256" ]]; then
+        as_project podman exec project sh -eu -c 'rm -rf /opt/ai-codex.next; install -d -m 0755 /opt/ai-codex.next'
+        as_project podman cp /opt/ai-codex/. project:/opt/ai-codex.next/
+        as_project podman exec project sh -eu -c '
+            rm -rf /opt/ai-codex.previous
+            if [ -d /opt/ai-codex ]; then mv /opt/ai-codex /opt/ai-codex.previous; fi
+            mv /opt/ai-codex.next /opt/ai-codex
+            printf "%s" "$1" > /opt/ai-codex/ai-bootstrap-version
+        ' _ "$CODEX_VERSION:$CODEX_SHA256"
+    fi
+    as_project podman cp /usr/local/libexec/ai-bootstrap/codex-client project:/usr/local/bin/codex
+    as_project podman exec project chmod 0755 /usr/local/bin/codex
+    if [[ -f /var/lib/ai-codex/projects/$project/chatgpt/auth.lock &&
+          ! -L /var/lib/ai-codex/projects/$project/chatgpt/auth.lock ]]; then
+        systemctl stop "ai-bootstrap-codex-project@$project.socket" "ai-bootstrap-codex-project@$project.service"
+    fi
+    runuser -u ai-codex -- python3 -I /usr/local/libexec/ai-bootstrap/codex-project.py "$project"
+    generation=$(sha256sum /usr/local/libexec/ai-bootstrap/codex_service.py \
+        /usr/local/libexec/ai-bootstrap/codex-executor.py /usr/local/libexec/ai-bootstrap/codex-project.py \
+        /etc/systemd/system/ai-bootstrap-codex-project@.service \
+        /etc/systemd/system/ai-bootstrap-codex-executor@.service /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
+    previous=$(cat "$project_dir/codex-generation" 2>/dev/null || true)
+    systemctl enable --now "ai-bootstrap-codex-executor@$project.socket" "ai-bootstrap-codex-project@$project.socket"
+    if [[ $previous != "$generation" ]]; then
+        systemctl try-restart "ai-bootstrap-codex-project@$project.service" "ai-bootstrap-codex-executor@$project.service"
+        printf '%s' "$generation" > "$project_dir/codex-generation"
+    fi
+}
+
 configure_canvas() {
     [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
     [[ -f /etc/ai-bootstrap/model-gateway.json ]] || die 'configure the model gateway before Canvas'
@@ -283,6 +317,7 @@ configure_canvas() {
     flock 9
     project_account
     configure_qwen
+    configure_codex
     source /etc/ai-bootstrap/sandbox-release.env
     local generation previous
     generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py | cut -d ' ' -f 1)"
@@ -296,7 +331,9 @@ path=pathlib.Path('/var/lib/ai-canvas/connections')/(sys.argv[1]+'.json')
 settings=json.loads(path.read_text()) if path.exists() else {'key':secrets.token_urlsafe(32)}
 if 'conversation_id' not in settings:
     settings['conversation_id']=str(uuid.uuid4())
-    path.write_text(json.dumps(settings))
+if 'codex_conversation_id' not in settings:
+    settings['codex_conversation_id']=str(uuid.uuid4())
+path.write_text(json.dumps(settings))
 path.chmod(0o640)
 os.chown(path,0,grp.getgrnam('ai-portal').gr_gid)
 PY
@@ -340,6 +377,11 @@ github_delete() {
         systemctl stop "ai-bootstrap-canvas-relay@$project.service"
         rm -f -- "/var/lib/ai-canvas/connections/$project.json"
     fi
+    if [[ -f /etc/systemd/system/ai-bootstrap-codex-project@.socket ]]; then
+        systemctl disable --now "ai-bootstrap-codex-project@$project.socket" "ai-bootstrap-codex-executor@$project.socket"
+        systemctl stop "ai-bootstrap-codex-project@$project.service" "ai-bootstrap-codex-executor@$project.service"
+        rm -rf -- "/var/lib/ai-codex/projects/$project"
+    fi
     if ! id "$user" >/dev/null 2>&1; then
         [[ ! -e $project_dir/disk.ext4 ]] && ! mountpoint -q -- "$disk" || die 'project account is missing'
         return 0
@@ -371,6 +413,13 @@ case $action in
     github-create) github_create "$@" ;;
     github-delete) github_delete "$@" ;;
     canvas-setup) configure_canvas "$@" ;;
+    codex-setup)
+        [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
+        exec 9>/run/lock/ai-bootstrap-sandbox.lock
+        flock 9
+        project_account
+        configure_codex
+        ;;
     resources)
         [[ $# == 0 ]] || die 'resources expects one project name'
         project_account

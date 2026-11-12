@@ -1,0 +1,81 @@
+#!/usr/bin/python3 -I
+"""Project terminal and ACP client; no OpenAI credentials or host RPC."""
+import json
+import select
+import socket
+import sys
+
+
+def main():
+    connection = socket.socket(socket.AF_UNIX)
+    try:
+        connection.connect('/run/ai-bootstrap-git/codex.sock')
+    except OSError:
+        sys.exit('Codex не подключён. Повторите подключение Canvas в портале.')
+    with connection:
+        if sys.argv[1:] == ['--acp']:
+            while True:
+                ready, _, _ = select.select([sys.stdin.buffer, connection], [], [])
+                for source in ready:
+                    if source is connection:
+                        data = connection.recv(65536)
+                        if not data:
+                            return
+                        sys.stdout.buffer.write(data)
+                        sys.stdout.buffer.flush()
+                    else:
+                        data = sys.stdin.buffer.read1(65536)
+                        if not data:
+                            return
+                        connection.sendall(data)
+        else:
+            reader = connection.makefile('rb')
+            sequence = 0
+
+            def call(method, params):
+                nonlocal sequence
+                sequence += 1
+                connection.sendall(json.dumps({'jsonrpc': '2.0', 'id': sequence, 'method': method, 'params': params}).encode() + b'\n')
+                while line := reader.readline(1024 * 1024):
+                    message = json.loads(line)
+                    if message.get('id') == sequence:
+                        if 'error' in message:
+                            sys.exit(message['error']['message'])
+                        if message['result'].get('stopReason') == 'refusal':
+                            print()
+                            sys.exit(1)
+                        return message['result']
+                    update = message.get('params', {}).get('update', {})
+                    if update.get('sessionUpdate') == 'agent_message_chunk':
+                        print(update['content']['text'], end='', flush=True)
+                    elif update.get('sessionUpdate') == 'tool_call':
+                        print('\n[Codex] ' + update['title'], file=sys.stderr)
+                sys.exit('Соединение с Codex закрыто. Выполнение остановлено.')
+
+            call('initialize', {'protocolVersion': 1, 'clientCapabilities': {}})
+            session = call('session/new', {'cwd': '/workspace/repo', 'mcpServers': []})['sessionId']
+            arguments = sys.argv[1:]
+            if arguments and arguments[0] == 'exec':
+                arguments = arguments[1:]
+            if arguments:
+                call('session/prompt', {'sessionId': session, 'prompt': [{'type': 'text', 'text': ' '.join(arguments)}]})
+                print()
+                return
+            print('Codex — песочница проекта. /exit для выхода.')
+            while True:
+                try:
+                    prompt = input('> ')
+                except EOFError:
+                    break
+                if prompt.strip() == '/exit':
+                    break
+                if prompt.strip():
+                    call('session/prompt', {'sessionId': session, 'prompt': [{'type': 'text', 'text': prompt}]})
+                    print()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyboardInterrupt):
+        sys.exit('Codex: соединение прервано.')

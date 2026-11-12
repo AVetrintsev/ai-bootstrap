@@ -7,9 +7,11 @@ from itertools import chain
 from pathlib import Path
 import re
 import sqlite3
+import socketserver
 import sys
 import tempfile
 from threading import Barrier
+from threading import Thread
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlencode, urlsplit
@@ -21,6 +23,47 @@ from portal import Portal, print_activation_url
 
 
 class PortalTest(unittest.TestCase):
+    def test_codex_page_distinguishes_limits_and_requires_confirmed_csrf_protected_billing_change(self):
+        import json
+        state = {'status': 'login_required', 'profile': 'chatgpt', 'api_configured': True}
+        class Control(socketserver.StreamRequestHandler):
+            def handle(self):
+                request = json.loads(self.rfile.readline())
+                if request['action'] == 'profile':
+                    state['profile'] = request['profile']
+                self.wfile.write(json.dumps(state).encode() + b'\n')
+        server = socketserver.ThreadingUnixStreamServer(str(self.state / 'codex.sock'), Control)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            cookie, _, _ = self.enroll()
+            status, _, body = self.request('/codex', cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertIn('Требуется вход'.encode(), body)
+            csrf = re.search(rb'name="csrf" value="([^"]+)"', body).group(1).decode()
+            state['status'] = 'limit_reached'
+            self.assertIn('Лимит подписки исчерпан'.encode(), self.request('/codex', cookie=cookie)[2])
+            self.assertEqual(self.request('/codex/profile', cookie=cookie,
+                form={'csrf': 'wrong', 'profile': 'api', 'confirm': 'yes'})[0], 403)
+            self.assertEqual(self.request('/codex/profile', cookie=cookie,
+                form={'csrf': csrf, 'profile': 'api'})[0], 400)
+            self.assertEqual(state['profile'], 'chatgpt')
+            self.assertEqual(self.request('/codex/profile', cookie=cookie,
+                form={'csrf': csrf, 'profile': 'api', 'confirm': 'yes'})[0], 200)
+            self.assertEqual(state['profile'], 'api')
+        finally:
+            server.shutdown()
+            worker.join()
+            server.server_close()
+
+    def test_codex_setup_requires_owner_session_and_reports_service_unavailable(self):
+        for path in ("/codex", "/codex/login", "/codex/profile"):
+            self.assertEqual(self.request(path)[0], 404)
+        cookie, _, _ = self.enroll()
+        status, _, body = self.request("/codex", cookie=cookie)
+        self.assertEqual(status, 503)
+        self.assertIn("Служба Codex недоступна".encode(), body)
+
     def setUp(self):
         self.work = tempfile.TemporaryDirectory()
         self.addCleanup(self.work.cleanup)
@@ -30,7 +73,8 @@ class PortalTest(unittest.TestCase):
         self.portal = self.new_portal()
 
     def new_portal(self, *, secure=False):
-        return Portal(self.state, self.key, clock=lambda: self.time, secure=secure)
+        return Portal(self.state, self.key, clock=lambda: self.time, secure=secure,
+                      codex_socket=str(self.state / 'codex.sock'))
 
     def activation(self, base="http://localhost:8080"):
         output = StringIO()

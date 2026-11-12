@@ -10,15 +10,22 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-if os.geteuid() != 0 or len(sys.argv) != 3:
-    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM")
-project, chromium = sys.argv[1:]
+if os.geteuid() != 0 or len(sys.argv) not in (3, 4, 5):
+    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex] [shell|mcp]")
+project, chromium = sys.argv[1:3]
+agent = sys.argv[3] if len(sys.argv) >= 4 else 'qwen'
+tool = sys.argv[4] if len(sys.argv) == 5 else 'shell'
+if agent not in ('qwen', 'codex'):
+    sys.exit('Expected qwen or codex')
+if tool not in ('shell', 'mcp') or (tool == 'mcp' and agent != 'codex'):
+    sys.exit('MCP acceptance requires Codex and its temporary probe fixture')
 session = secrets.token_urlsafe(32)
 token_hash = hashlib.sha256(session.encode()).digest()
 database = "/var/lib/ai-portal/portal.sqlite3"
 now = int(time.time())
 marker = "ai-canvas-accept-" + secrets.token_hex(8)
 marker_path = "/workspace/repo/." + marker
+executor_stopped = False
 with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
                (token_hash, now + 600, "Canvas acceptance", now, now))
@@ -43,11 +50,16 @@ try:
                 break
             page.wait_for_timeout(2000)
             page.reload()
-        row.get_by_role("link", name="Открыть", exact=True).click()
+        row.get_by_role("link", name="Открыть" if agent == 'codex' else "Qwen Code", exact=True).click()
         page.get_by_test_id("chat-input").wait_for(timeout=90000)
         print("Canvas URL:", page.url)
         prompt = (f"Use the shell tool to run exactly: test \"$PWD\" = /workspace/repo && printf '%s' '{marker}' > '{marker_path}'\n"
                   "Do not read or change any other files. Then reply DONE.")
+        if tool == 'mcp':
+            prompt = f'Call the MCP acceptance probe tool with file="{marker_path}" and text="{marker}". Use only that MCP tool, not shell. Then reply DONE.'
+        def has_tool(transcript):
+            return (any(line.strip() == 'probe' for line in transcript.splitlines()) if tool == 'mcp' else
+                    any(marker in line and ('Running Shell:' in line or '/bin/bash' in line) for line in transcript.splitlines()))
         page.get_by_test_id("chat-input").fill(prompt)
         page.get_by_test_id("chat-input").press("Enter")
         for _ in range(90):
@@ -55,7 +67,7 @@ try:
                                     capture_output=True, text=True)
             if result.returncode == 0 and result.stdout == marker:
                 transcript = page.locator("body").inner_text()
-                if any(line.startswith("Running Shell:") and marker in line for line in transcript.splitlines()):
+                if has_tool(transcript):
                     break
             approval = page.get_by_role("button", name=re.compile(r"^(Allow once|Approve|Allow|Разрешить)$", re.I))
             if approval.count() and approval.first.is_visible():
@@ -63,20 +75,54 @@ try:
             page.wait_for_timeout(2000)
         else:
             print("Canvas failure:", page.locator("body").inner_text())
-            raise AssertionError("Qwen result was not confirmed in both the checkout and Canvas tool output")
+            raise AssertionError(f"{agent} result was not confirmed in both the checkout and Canvas tool output")
         page.wait_for_timeout(2000)
         transcript = page.locator("body").inner_text()
         print("Canvas result:", transcript)
-        assert any(line.startswith("Running Shell:") and marker in line for line in transcript.splitlines()), "No matching Qwen tool in Canvas"
+        assert has_tool(transcript), "No matching agent tool in Canvas"
         assert frames, "No live WebSocket events"
         print("WebSocket events:", len(frames))
-        print("OK Qwen wrote the marker in the same checkout used by ai-sandbox shell")
+        print(f"OK {agent} wrote the marker in the same checkout used by ai-sandbox shell")
         screenshot = "/tmp/" + marker + ".png"
         page.screenshot(path=screenshot, full_page=True)
         print("Screenshot:", screenshot)
+        if agent == 'codex' and tool == 'shell':
+            subprocess.run(['systemctl', 'stop', f'ai-bootstrap-codex-executor@{project}.socket',
+                            f'ai-bootstrap-codex-executor@{project}.service'], check=True)
+            executor_stopped = True
+            page.get_by_test_id('chat-input').fill(f'Write the word blocked to {marker_path}-blocked using the shell tool.')
+            page.get_by_test_id('chat-input').press('Enter')
+            page.get_by_text(re.compile('Исполнитель проекта недоступен')).first.wait_for(timeout=60000)
+            absent = subprocess.run(['ai-sandbox', 'shell', project, 'test', '!', '-e', marker_path + '-blocked'])
+            assert absent.returncode == 0
+            assert not os.path.exists(marker_path + '-blocked')
+            print('OK Canvas shows an explicit executor error without writing on the host or in the sandbox')
+            subprocess.run(['systemctl', 'start', f'ai-bootstrap-codex-executor@{project}.socket'], check=True)
+            executor_stopped = False
+            # Reload the backend to prove a rejected message is not pending work.
+            import pwd
+            account = pwd.getpwnam('aisbx-' + project)
+            subprocess.run(['runuser', '-u', account.pw_name, '--', 'env', f'XDG_RUNTIME_DIR=/run/user/{account.pw_uid}',
+                            'systemctl', '--user', 'restart', 'ai-bootstrap-agent.service'], check=True, cwd='/')
+            # systemctl returns before the Python server has finished starting.
+            for _ in range(60):
+                ready = page.request.get(f'http://localhost:8080/agent/{project}/server_info', timeout=15000)
+                if ready.ok:
+                    break
+                page.wait_for_timeout(1000)
+            else:
+                raise AssertionError('Agent Server did not recover')
+            page.goto(f'http://localhost:8080/canvas/open/{project}')
+            page.get_by_test_id('chat-input').wait_for(timeout=90000)
+            page.wait_for_timeout(5000)
+            absent = subprocess.run(['ai-sandbox', 'shell', project, 'test', '!', '-e', marker_path + '-blocked'])
+            assert absent.returncode == 0, 'Rejected request replayed after recovery'
+            print('OK failed Canvas request remains rejected after service recovery')
         browser.close()
 finally:
-    subprocess.run(["ai-sandbox", "shell", project, "rm", "-f", "--", marker_path],
+    if executor_stopped:
+        subprocess.run(['systemctl', 'start', f'ai-bootstrap-codex-executor@{project}.socket'], check=True)
+    subprocess.run(["ai-sandbox", "shell", project, "rm", "-f", "--", marker_path, marker_path + '-blocked'],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     with sqlite3.connect(database) as db:
         db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))

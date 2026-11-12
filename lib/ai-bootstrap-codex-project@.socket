@@ -1,0 +1,12 @@
+[Unit]
+Description=Codex ACP interface for project %i
+
+[Socket]
+ListenStream=/run/ai-bootstrap-git/%i/codex.sock
+SocketGroup=aisbx-%i
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

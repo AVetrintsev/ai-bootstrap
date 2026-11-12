@@ -1,0 +1,20 @@
+[Unit]
+Description=Codex account control outside project sandboxes
+Requires=ai-bootstrap-codex.socket
+After=ai-bootstrap-codex.socket
+
+[Service]
+User=ai-codex
+ExecStart=/usr/bin/python3 -I /usr/local/libexec/ai-bootstrap/codex_service.py
+StateDirectory=ai-codex
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=384M
+TasksMax=128
+KillMode=control-group
+StandardOutput=null
+StandardError=null

@@ -49,6 +49,9 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
     async def open_project(request):
         project = request.match_info["project"]
         config = connection(project)
+        conversation = config.get("codex_conversation_id", config["conversation_id"])
+        if request.query.get("agent") == "qwen":
+            conversation = config["conversation_id"]
         projects = await asyncio.to_thread(github_request, "projects")
         selected = next((item for item in projects.get("projects", []) if item["sandbox"] == project), None)
         if not selected or selected["state"] != "ready" or selected.get("canvas") != "ready":
@@ -56,7 +59,7 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
         try:
             async with ClientSession(connector=UnixConnector(path=str(socket_dir / f"{project}.sock")),
                                      timeout=ClientTimeout(total=15)) as client:
-                for path in ("/server_info", "/api/settings", "/api/conversations/" + config["conversation_id"]):
+                for path in ("/server_info", "/api/settings", "/api/conversations/" + conversation):
                     async with client.get("http://localhost" + path, headers={"X-Session-API-Key": config["key"]}) as ready:
                         if ready.status != 200:
                             raise OSError("Agent Server is not ready")
@@ -68,7 +71,7 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
                 '<p><a href="/projects">К проектам — повторить подключение</a></p></html>')
         # Canvas 1.39.0 registry format and URL selection are pinned together.
         # The real Agent Server key stays on the platform; the authenticated proxy supplies it.
-        value = json.dumps({"id": project, "name": selected["name"], "conversation": config["conversation_id"]}).replace("<", "\\u003c")
+        value = json.dumps({"id": project, "name": selected["name"], "conversation": conversation}).replace("<", "\\u003c")
         script = """const project=PROJECT,id=project.id;
 const entry={id,name:project.name,host:location.origin+'/agent/'+id,apiKey:'portal-session',kind:'local'};
 let entries=[];
