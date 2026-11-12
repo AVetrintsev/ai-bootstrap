@@ -71,6 +71,17 @@ try:
                       f'Then use the shell tool to run: cd /workspace/repo && rg {fixture_symbol} {fixture_symbol}.ts '
                       f"&& ast-grep run --lang typescript --pattern 'function $NAME() {{ $$$BODY }}' {fixture_symbol}.ts "
                       f"&& printf '%s' '{marker}' > '{marker_path}'. Do not change other files. Reply DONE.")
+        def has_symbol(value):
+            if isinstance(value, str):
+                try:
+                    return has_symbol(json.loads(value))
+                except ValueError:
+                    return (any(has_symbol(line) for line in value.splitlines())
+                            if len(value.splitlines()) > 1 else value == fixture_symbol)
+            if isinstance(value, dict):
+                return not value.get('isError') and any(has_symbol(v) for k, v in value.items() if k not in ('query', 'search_term'))
+            return isinstance(value, list) and any(has_symbol(v) for v in value)
+
         def has_tool(transcript):
             if tool == 'project-tools':
                 completed = set()
@@ -78,8 +89,8 @@ try:
                     if isinstance(value, dict):
                         if (value.get('tool_call_id') and value.get('source') == 'agent' and
                                 value.get('status') == 'completed' and not value.get('is_error')):
-                            output = json.dumps(value.get('raw_output') or value.get('content'), ensure_ascii=False)
-                            if fixture_symbol in output:
+                            output = value.get('raw_output') or value.get('content')
+                            if has_symbol(output):
                                 for name in ('get_symbols_overview', 'find_code'):
                                     if name in value.get('title', ''):
                                         completed.add(name)
@@ -101,7 +112,7 @@ try:
         page.get_by_test_id("chat-input").press("Enter")
         for _ in range(90):
             result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
-                                    capture_output=True, text=True)
+                                    capture_output=True, text=True, stdin=subprocess.DEVNULL)
             if result.returncode == 0 and result.stdout == marker:
                 transcript = page.locator("body").inner_text()
                 if has_tool(transcript):
