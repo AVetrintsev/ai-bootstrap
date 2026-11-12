@@ -1,14 +1,33 @@
 ssh:
-  admin_ipv4:
-    - 192.0.2.24/32
+  allow_from_any_ipv4: true
+  # Для ограничения источников удалите allow_from_any_ipv4 и задайте admin_ipv4: [192.0.2.24/32].
 
 portal:
   transport: local-http
   # Для https задайте domain и expected_ipv4.
 
 sandbox:
+  memory_percent: 80  # Общий пул для всех песочниц, процент всей RAM VM.
+  cpu_percent: 80     # Общий пул для всех песочниц, процент мощности всех vCPU VM.
   internal_tcp: []
   # Здесь можно перечислить доверенные службы во внутренних сетях, например "10.2.3.4:8443".
+
+# Включите после сохранения ключа на хосте командой sudo ai-model-key openrouter.
+# model_gateway:
+#   providers:
+#     openrouter:
+#       base_url: https://openrouter.ai/api/v1
+#       key_file: /etc/ai-bootstrap/model-keys/openrouter.key
+#   models:
+#     qwen3.8-flash: {provider: openrouter, model: qwen/qwen3.8-flash}
+#   defaults:
+#     models: [qwen3.8-flash]
+#     requests_per_day: 100
+#     max_output_tokens: 8192
+#   projects: {}
+#   # Здесь можно переопределить всю политику для конкретной песочницы.
+#   # projects:
+#   #   example: {models: [qwen3.8-flash], requests_per_day: 20, max_output_tokens: 4096}
 
 mihomo:
   profile: |

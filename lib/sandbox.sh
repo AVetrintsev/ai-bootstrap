@@ -8,7 +8,7 @@ die() {
 }
 
 [[ $EUID == 0 ]] || die 'run as root'
-[[ $# -ge 2 ]] || die 'usage: ai-sandbox create PROJECT | shell PROJECT [COMMAND [ARG...]]'
+[[ $# -ge 2 ]] || die 'usage: ai-sandbox create PROJECT | qwen-setup PROJECT | shell PROJECT [COMMAND [ARG...]]'
 action=$1
 project=$2
 shift 2
@@ -50,6 +50,61 @@ publish_unit() {
     fi
 }
 
+configure_resources() {
+    local slice=ai-sandboxes-$uid.slice group restart=no manager_active=no container_active=no
+    group=$(systemctl show "user@$uid.service" --property=ControlGroup --value)
+    if systemctl is-active --quiet "user@$uid.service"; then
+        manager_active=yes
+        if as_project systemctl --user is-active --quiet "$unit"; then
+            container_active=yes
+        fi
+    fi
+    if [[ $manager_active == yes && $group != /ai.slice/ai-sandboxes.slice/$slice/* ]]; then
+        # Stop the container while its original user manager and cgroup still exist.
+        if [[ $container_active == yes ]]; then
+            as_project systemctl --user stop "$unit"
+        fi
+        systemctl stop "user@$uid.service"
+        restart=yes
+    fi
+    install -d -m 0755 "/etc/systemd/system/user@$uid.service.d"
+    publish_unit "/etc/systemd/system/$slice" <<'EOF'
+[Slice]
+TasksMax=256
+EOF
+    publish_unit "/etc/systemd/system/user@$uid.service.d/95-sandbox-resources.conf" <<EOF
+[Unit]
+Requires=ai-bootstrap-sandbox-resources.service
+After=ai-bootstrap-sandbox-resources.service
+[Service]
+Slice=$slice
+EOF
+    rm -f -- "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf" \
+        "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf"
+    systemctl daemon-reload
+    systemctl start ai-bootstrap-sandbox-resources.service
+    if [[ $restart == yes || -f /var/lib/systemd/linger/$user ]]; then
+        # Reparent the user manager once; persistent container storage stays in place.
+        systemctl start "user@$uid.service"
+        if [[ $container_active == yes && $restart == yes ]]; then
+            as_project systemctl --user start "$unit"
+        elif [[ $container_active != yes ]]; then
+            # A failed initial create may have a user manager but no container yet.
+            if [[ $restart == no && $manager_active == yes ]] ||
+                ! as_project systemctl --user is-enabled --quiet "$unit" 2>/dev/null; then
+                return
+            fi
+        fi
+        for attempt in {1..30}; do
+            if as_project podman exec project /usr/bin/true >/dev/null 2>&1; then
+                return
+            fi
+            sleep 1
+        done
+        die 'sandbox did not restart after applying the shared resource pool'
+    fi
+}
+
 setup_disk() {
     local image=$project_dir/disk.ext4 mount_unit socket_requires=
     install -d -m 0711 "$project_dir"
@@ -70,7 +125,7 @@ Where=$disk
 Type=ext4
 Options=loop,nodev,nosuid
 EOF
-    install -d -m 0755 "/etc/systemd/system/user@$uid.service.d" "/etc/systemd/system/user-$uid.slice.d"
+    install -d -m 0755 "/etc/systemd/system/user@$uid.service.d"
     if [[ ${#github_mounts[@]} != 0 ]]; then
         socket_requires=$'Requires='"$github_socket"$'\nAfter='"$github_socket"
     fi
@@ -81,13 +136,6 @@ After=ai-bootstrap-firewall.service
 RequiresMountsFor=$disk
 $socket_requires
 EOF
-    publish_unit "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf" <<'EOF'
-[Slice]
-CPUQuota=100%
-MemoryMax=384M
-MemorySwapMax=0
-TasksMax=256
-EOF
     systemctl daemon-reload
     systemctl start "$mount_unit"
     if [[ ! -e $home ]]; then
@@ -95,6 +143,7 @@ EOF
     fi
     [[ -d $home && ! -L $home && $(stat -c '%u:%g:%a' "$home") == "$uid:$gid:700" ]] ||
         die 'incompatible project home'
+    configure_resources
 }
 
 base_archive() {
@@ -112,6 +161,42 @@ base_archive() {
     fi
     printf '%s  %s\n' "$SANDBOX_BASE_SHA256" "$archive" | sha256sum -c --status ||
         die 'cached base archive failed the release SHA-256 check'
+}
+
+gateway_address() {
+    python3 -I -c '
+import ipaddress,json,subprocess
+routes=json.loads(subprocess.check_output(["ip","-4","-j","route","show","default"]))
+for route in routes:
+ for interface in json.loads(subprocess.check_output(["ip","-4","-j","address","show","dev",route["dev"]])):
+  for address in interface["addr_info"]:
+   if address["scope"] == "global":
+    print(ipaddress.IPv4Address(address["local"])); raise SystemExit
+raise SystemExit("No host IPv4 address for the model gateway")
+'
+}
+
+configure_qwen() {
+    [[ -f /etc/ai-bootstrap/model-gateway.json ]] || return 0
+    local gateway_host client
+    gateway_host=$(gateway_address) || die 'could not determine the model gateway address'
+    # The installed release pins Qwen; all package changes remain inside this container.
+    source /etc/ai-bootstrap/sandbox-release.env
+    as_project podman exec --interactive project /bin/bash -s -- "$QWEN_CODE_VERSION" \
+        < /usr/local/libexec/ai-bootstrap/qwen-setup.sh
+    as_project podman cp /usr/local/libexec/ai-bootstrap/qwen-launcher project:/usr/local/bin/qwen
+    as_project podman exec project chmod 0755 /usr/local/bin/qwen
+    client=$(runuser -u ai-models -- python3 -I /usr/local/libexec/ai-bootstrap/model_gateway.py provision "$project")
+    printf '%s' "$client" | as_project podman exec --interactive --env "AI_GATEWAY_HOST=$gateway_host" project python3 -I -c '
+import json,os,pathlib,sys
+settings=json.load(sys.stdin)
+settings["base_url"]="http://"+os.environ["AI_GATEWAY_HOST"]+":18081/v1"
+directory=pathlib.Path("/root/.config/ai-bootstrap")
+directory.mkdir(mode=0o700,parents=True,exist_ok=True)
+path=directory/"model-gateway.json"
+path.write_text(json.dumps(settings))
+path.chmod(0o600)
+'
 }
 
 create_project() {
@@ -155,6 +240,7 @@ create_project() {
     for attempt in {1..20}; do
         if as_project podman exec project /usr/bin/true >/dev/null 2>&1; then
             loginctl enable-linger "$user"
+            configure_qwen
             return
         fi
         sleep 1
@@ -210,13 +296,16 @@ github_delete() {
         fi
         return 0
     fi
+    if [[ -f /var/lib/ai-models/gateway.sqlite3 ]]; then
+        runuser -u ai-models -- python3 -I /usr/local/libexec/ai-bootstrap/model_gateway.py revoke "$project"
+    fi
     if ! id "$user" >/dev/null 2>&1; then
         [[ ! -e $project_dir/disk.ext4 ]] && ! mountpoint -q -- "$disk" || die 'project account is missing'
         return 0
     fi
     project_account
     loginctl disable-linger "$user"
-    systemctl stop "user@$uid.service" "user-$uid.slice" "$github_socket"
+    systemctl stop "user@$uid.service" "ai-sandboxes-$uid.slice" "user-$uid.slice" "$github_socket"
     mount_unit=$(systemd-escape --path --suffix=mount "$disk")
     if [[ -e /etc/systemd/system/$mount_unit ]]; then
         systemctl stop "$mount_unit"
@@ -226,6 +315,9 @@ github_delete() {
         "/etc/systemd/system/$mount_unit" \
         "/etc/systemd/system/user@$uid.service.d/90-ai-bootstrap.conf" \
         "/etc/systemd/system/user-$uid.slice.d/90-ai-bootstrap.conf"
+    rm -f -- "/etc/systemd/system/user-$uid.slice.d/95-qwen.conf" \
+        "/etc/systemd/system/user@$uid.service.d/95-sandbox-resources.conf" \
+        "/etc/systemd/system/ai-sandboxes-$uid.slice"
     systemctl daemon-reload
     userdel "$user"
 }
@@ -237,8 +329,22 @@ case $action in
         ;;
     github-create) github_create "$@" ;;
     github-delete) github_delete "$@" ;;
+    resources)
+        [[ $# == 0 ]] || die 'resources expects one project name'
+        project_account
+        configure_resources
+        ;;
+    qwen-setup)
+        [[ $# == 0 ]] || die 'qwen-setup expects one project name'
+        project_account
+        configure_qwen
+        ;;
     shell)
         project_account
+        gateway_env=()
+        if [[ -f /etc/ai-bootstrap/model-gateway.json ]] && gateway_host=$(gateway_address 2>/dev/null); then
+            gateway_env=(--env "AI_GATEWAY_HOST=$gateway_host")
+        fi
         args=(--interactive)
         if [[ -t 0 && -t 1 ]]; then
             args+=(--tty)
@@ -246,7 +352,7 @@ case $action in
         if [[ $# == 0 ]]; then
             set -- /bin/bash -l
         fi
-        as_project podman exec "${args[@]}" project "$@"
+        as_project podman exec "${args[@]}" "${gateway_env[@]}" project "$@"
         ;;
-    *) die 'expected create or shell' ;;
+    *) die 'expected create, qwen-setup or shell' ;;
 esac

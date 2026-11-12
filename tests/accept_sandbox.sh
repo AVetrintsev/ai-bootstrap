@@ -78,11 +78,11 @@ check_isolation() {
                 podman inspect --format '{{.State.Pid}}' project
         )
         [[ $(awk '/^Uid:/ {print $2}' "/proc/$pid/status") == "$uid" ]]
-        grep -q "^0::/user.slice/user-$uid.slice/" "/proc/$pid/cgroup"
-        slice=/sys/fs/cgroup/user.slice/user-$uid.slice
+        grep -q "^0::/ai.slice/ai-sandboxes.slice/ai-sandboxes-$uid.slice/" "/proc/$pid/cgroup"
+        slice=/sys/fs/cgroup/ai.slice/ai-sandboxes.slice/ai-sandboxes-$uid.slice
         read -r quota period < "$slice/cpu.max"
-        [[ $quota == "$period" ]]
-        [[ $(<"$slice/memory.max") == 402653184 ]]
+        [[ $quota == max ]]
+        [[ $(<"$slice/memory.max") == max ]]
         [[ $(<"$slice/pids.max") == 256 ]]
         for path in /var/lib/ai-sandboxes /home/owner/.ssh /root/.ssh /etc/ai-bootstrap \
             /run/podman/podman.sock "/run/user/$uid/podman/podman.sock"; do

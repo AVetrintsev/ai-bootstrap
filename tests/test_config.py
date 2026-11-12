@@ -9,6 +9,28 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class ConfigTests(unittest.TestCase):
+    def test_sandbox_pool_defaults_to_eighty_percent_of_vm_memory_and_cpu(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        result, resources = self.stage(example, artifact="sandbox-resources")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(resources, "80 80\n")
+
+    def test_rejects_invalid_shared_resource_percentages(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        for field in ("memory_percent", "cpu_percent"):
+            for value in ("0", "101", "true", "50.5", "'80'"):
+                with self.subTest(field=field, value=value):
+                    result, _ = self.stage(example.replace(field + ": 80", field + ": " + value))
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("sandbox." + field, result.stderr)
+
+    def test_all_ipv4_ssh_access_requires_explicit_setting(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        config = "ssh:\n  allow_from_any_ipv4: true\n" + example[example.index("portal:"):]
+        result, firewall = self.stage(config, artifact="firewall.nft")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("elements = { 0.0.0.0/0 }", firewall)
+
     def stage(self, content, mode=0o600, artifact="profile.yaml"):
         with tempfile.TemporaryDirectory() as directory:
             work = pathlib.Path(directory)

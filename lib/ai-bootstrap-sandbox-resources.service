@@ -1,0 +1,14 @@
+[Unit]
+Description=Set shared AI sandbox resource budgets for this VM
+Requires=ai-sandboxes.slice
+After=ai-sandboxes.slice
+Before=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/ai-bootstrap/sandbox-resources.sh
+ExecReload=/usr/local/libexec/ai-bootstrap/sandbox-resources.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

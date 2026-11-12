@@ -1,6 +1,7 @@
 """Validate the operator YAML and stage the profile and firewall."""
 
 import ipaddress
+import json
 import os
 from pathlib import Path
 import re
@@ -138,26 +139,45 @@ def stage(config_path, work):
         raise ValueError("cannot read config as a regular UTF-8 file") from None
 
     ssh = mapping(config.get("ssh"), "ssh")
-    admins = ssh.get("admin_ipv4")
+    any_ipv4 = ssh.get("allow_from_any_ipv4", False)
+    if type(any_ipv4) is not bool or (any_ipv4 and "admin_ipv4" in ssh):
+        raise ValueError("ssh.allow_from_any_ipv4 must be boolean and cannot be combined with admin_ipv4")
+    admins = ["0.0.0.0/0"] if any_ipv4 else ssh.get("admin_ipv4")
     if not isinstance(admins, list) or not admins or not all(isinstance(item, str) for item in admins):
         raise ValueError("ssh.admin_ipv4 must list administrator IPv4 addresses or CIDRs")
     try:
         networks = tuple(ipaddress.collapse_addresses(ipaddress.IPv4Network(item) for item in admins))
     except ValueError:
         raise ValueError("ssh.admin_ipv4 contains an invalid IPv4 address or CIDR") from None
-    if networks[0].prefixlen == 0:
+    if networks[0].prefixlen == 0 and not any_ipv4:
         raise ValueError("ssh.admin_ipv4 must restrict access to administrator networks")
 
     transport = validate_portal(mapping(config.get("portal", {}), "portal"))
     profile = mapping(config.get("mihomo"), "mihomo").get("profile")
     validate_profile(profile)
     sandbox_enabled = "sandbox" in config
-    internal_tcp = sandbox_internal_tcp(mapping(config.get("sandbox", {}), "sandbox"))
+    sandbox = mapping(config.get("sandbox", {}), "sandbox")
+    internal_tcp = sandbox_internal_tcp(sandbox)
+    resources = []
+    for field in ("memory_percent", "cpu_percent"):
+        value = sandbox.get(field, 80)
+        if type(value) is not int or not 1 <= value <= 100:
+            raise ValueError(f"sandbox.{field} must be an integer from 1 to 100")
+        resources.append(value)
+    gateway = config.get("model_gateway")
+    if gateway is not None:
+        if not sandbox_enabled:
+            raise ValueError("model_gateway requires sandbox")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from model_gateway import validate_settings
+        gateway = validate_settings(gateway)
 
     template = Path(__file__).resolve().parent / "firewall.nft"
     rules = template.read_text(encoding="utf-8").replace("@ADMIN_IPV4@", ", ".join(map(str, networks)))
     rules = rules.replace("@SANDBOX_UID_RANGE@", f"{SANDBOX_UID_MIN}-{SANDBOX_UID_MAX}")
     rules = rules.replace("@SANDBOX_INTERNAL_TCP@", internal_tcp)
+    gateway_rule = "fib daddr type local tcp dport 18081 accept" if gateway is not None else ""
+    rules = rules.replace("@MODEL_GATEWAY_ROUTE@", gateway_rule).replace("@MODEL_GATEWAY_EGRESS@", gateway_rule)
     rules = rules.replace(
         "@SANDBOX_ROUTE@", "jump sandbox_route" if sandbox_enabled else "drop"
     ).replace(
@@ -169,10 +189,12 @@ def stage(config_path, work):
     (work / "admin-ipv4").write_text("\n".join(map(str, networks)), encoding="utf-8")
     (work / "profile.yaml").write_text(profile, encoding="utf-8")
     (work / "portal-transport").write_text(transport + "\n", encoding="utf-8")
+    (work / "model-gateway.json").write_text(json.dumps(gateway) + "\n", encoding="utf-8")
     enabled = "yes" if sandbox_enabled else "no"
     (work / "sandbox-settings").write_text(
         f"{enabled} {SANDBOX_UID_MIN} {SANDBOX_UID_MAX}\n", encoding="utf-8"
     )
+    (work / "sandbox-resources").write_text(" ".join(map(str, resources)) + "\n", encoding="utf-8")
 
 
 def check_ssh(work):
