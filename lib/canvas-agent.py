@@ -42,7 +42,8 @@ def request(path, method="GET", body=None):
     with urllib.request.urlopen(request, timeout=15) as response:
         return json.load(response)
 
-for attempt in range(90):
+deadline = time.monotonic() + 90
+while time.monotonic() < deadline:
     try:
         current = request("/api/settings")
         break

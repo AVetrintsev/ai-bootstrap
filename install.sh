@@ -253,6 +253,7 @@ configure_sandbox() {
     install -d -m 0755 /etc/systemd/user
     publish "$release/release.env" "$etc/sandbox-release.env" 600
     publish "$release/lib/sandbox.sh" /usr/local/sbin/ai-sandbox 755
+    publish "$release/lib/gateway-address.py" "$libexec/gateway-address.py" 644
     publish "$release/lib/ai-bootstrap-sandbox.service" /etc/systemd/user/ai-bootstrap-sandbox.service 644
     publish "$work/sandbox-settings" "$etc/sandbox-settings" 600
     publish "$work/sandbox-resources" "$etc/sandbox-resources" 600

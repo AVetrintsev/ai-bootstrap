@@ -82,6 +82,25 @@ class CanvasTest(unittest.IsolatedAsyncioTestCase):
             message = await websocket.receive(timeout=2)
             self.assertNotEqual(message.type.name, "TEXT")
 
+    async def test_user_activity_renews_session_but_background_requests_do_not(self):
+        original_expiry = self.now + SESSION_LIFETIME
+        cookie = {"ai_session": self.session}
+        self.now += 100
+        async with self.client.get(self.server.make_url("/conversations"), cookies=cookie) as response:
+            self.assertEqual(response.status, 200)
+            self.assertNotIn("Set-Cookie", response.headers)
+        with self.owner.connect() as db:
+            self.assertEqual(db.execute("SELECT expires_at FROM sessions").fetchone()[0], original_expiry)
+        async with self.client.post(self.server.make_url("/canvas/activity"), cookies=cookie) as response:
+            self.assertEqual(response.status, 403)
+        origin = str(self.server.make_url("/")).rstrip("/")
+        async with self.client.post(self.server.make_url("/canvas/activity"), cookies=cookie,
+                                    headers={"Origin": origin}) as response:
+            self.assertEqual(response.status, 204)
+            self.assertIn("ai_session=", response.headers["Set-Cookie"])
+        with self.owner.connect() as db:
+            self.assertEqual(db.execute("SELECT expires_at FROM sessions").fetchone()[0], self.now + SESSION_LIFETIME)
+
     async def test_expiry_closes_idle_event_stream_without_waiting_for_an_agent_event(self):
         finished = asyncio.Event()
 

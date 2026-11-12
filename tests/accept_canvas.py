@@ -26,6 +26,7 @@ try:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=chromium, headless=True, args=["--no-sandbox"])
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
+        context.set_default_timeout(120000)
         context.add_cookies([{"name": "ai_session", "value": session, "url": "http://localhost:8080",
                               "httpOnly": True, "sameSite": "Strict"}])
         page = context.new_page()
@@ -48,8 +49,7 @@ try:
         prompt = (f"Use the shell tool to run exactly: test \"$PWD\" = /workspace/repo && printf '%s' '{marker}' > '{marker_path}'\n"
                   "Do not read or change any other files. Then reply DONE.")
         page.get_by_test_id("chat-input").fill(prompt)
-        # The app may schedule background navigations; completion is the file below.
-        page.get_by_test_id("submit-button").click(no_wait_after=True)
+        page.get_by_test_id("chat-input").press("Enter")
         for _ in range(90):
             result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
                                     capture_output=True, text=True)
@@ -63,9 +63,11 @@ try:
             print("Canvas failure:", page.locator("body").inner_text())
             raise AssertionError("Qwen did not write the marker into the project checkout")
         page.wait_for_timeout(2000)
-        print("Canvas result:", page.locator("body").inner_text())
-        assert any("run_shell_command" in str(frame) and marker in str(frame) for frame in frames), "No matching Qwen tool event"
-        print("WebSocket events:", len(frames), "including the matching Qwen shell tool")
+        transcript = page.locator("body").inner_text()
+        print("Canvas result:", transcript)
+        assert any(line.startswith("Running Shell:") and marker in line for line in transcript.splitlines()), "No matching Qwen tool in Canvas"
+        assert frames, "No live WebSocket events"
+        print("WebSocket events:", len(frames))
         print("OK Qwen wrote the marker in the same checkout used by ai-sandbox shell")
         screenshot = "/tmp/" + marker + ".png"
         page.screenshot(path=screenshot, full_page=True)

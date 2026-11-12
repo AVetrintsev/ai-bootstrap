@@ -164,16 +164,7 @@ base_archive() {
 }
 
 gateway_address() {
-    python3 -I -c '
-import ipaddress,json,subprocess
-routes=json.loads(subprocess.check_output(["ip","-4","-j","route","show","default"]))
-for route in routes:
- for interface in json.loads(subprocess.check_output(["ip","-4","-j","address","show","dev",route["dev"]])):
-  for address in interface["addr_info"]:
-   if address["scope"] == "global":
-    print(ipaddress.IPv4Address(address["local"])); raise SystemExit
-raise SystemExit("No host IPv4 address for the model gateway")
-'
+    python3 -I /usr/local/libexec/ai-bootstrap/gateway-address.py
 }
 
 configure_qwen() {
@@ -293,6 +284,9 @@ configure_canvas() {
     project_account
     configure_qwen
     source /etc/ai-bootstrap/sandbox-release.env
+    local generation previous
+    generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py | cut -d ' ' -f 1)"
+    previous=$(as_project podman exec project cat /opt/ai-canvas-control/generation 2>/dev/null || true)
     as_project podman exec project test -d /workspace/repo/.git
     as_project podman exec --interactive project bash -s -- "$AGENT_SERVER_VERSION" \
         < /usr/local/libexec/ai-bootstrap/canvas-setup.sh
@@ -312,8 +306,18 @@ PY
     as_project podman exec --interactive project sh -c 'umask 077; cat > /root/.config/ai-bootstrap/canvas.json' \
         < "/var/lib/ai-canvas/connections/$project.json"
     as_project systemctl --user daemon-reload
-    as_project systemctl --user enable --now ai-bootstrap-agent.service
-    as_project podman exec project python3 -I /opt/ai-canvas-control/agent.py configure
+    as_project systemctl --user enable ai-bootstrap-agent.service
+    if [[ $previous != "$generation" ]]; then
+        as_project systemctl --user restart ai-bootstrap-agent.service
+    else
+        as_project systemctl --user start ai-bootstrap-agent.service
+    fi
+    if ! as_project podman exec project python3 -I /opt/ai-canvas-control/agent.py configure; then
+        # A retry must also repair a running but unresponsive server.
+        as_project systemctl --user restart ai-bootstrap-agent.service
+        as_project podman exec project python3 -I /opt/ai-canvas-control/agent.py configure
+    fi
+    printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-canvas-control/generation'
     systemctl enable --now "ai-bootstrap-canvas-relay@$project.socket"
 }
 

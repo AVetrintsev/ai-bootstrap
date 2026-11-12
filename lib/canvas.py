@@ -16,6 +16,18 @@ from portal import KEY, STATE, SESSION_LIFETIME, OwnerAccess, digest, foreground
 PROJECT = re.compile(r"gh-[1-9][0-9]{0,18}")
 SAFE_HEADERS = {"content-type", "accept", "range", "if-none-match", "x-expose-secrets"}
 RESPONSE_HEADERS = {"content-type", "content-range", "accept-ranges", "etag"}
+ACTIVITY_SCRIPT = """<script>
+window.__AGENT_CANVAS_DO_NOT_TRACK__=true;
+(() => {
+  let nextActivity=0;
+  const recordActivity=event => {
+    if (!event.isTrusted || Date.now()<nextActivity) return;
+    nextActivity=Date.now()+60000;
+    fetch('/canvas/activity',{method:'POST',keepalive:true}).catch(()=>{});
+  };
+  for (const event of ['pointerdown','keydown']) document.addEventListener(event,recordActivity,{capture:true});
+})();
+</script>"""
 
 
 def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"), check_interval=1):
@@ -69,6 +81,19 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
         return web.Response(content_type="text/html", text=
             '<!doctype html><html lang="ru"><meta charset="utf-8"><title>Открытие проекта</title>'
             '<p>Открываем Canvas…</p><script>' + script + '</script></html>')
+
+    async def activity(request):
+        # Only the same-origin frontend records trusted user gestures, never a timer.
+        if request.headers.get("Origin") != f"{request.scheme}://{request.host}":
+            raise web.HTTPForbidden()
+        await asyncio.to_thread(owner.dashboard, digest(request["session"]), renew=True)
+        response = web.Response(status=204)
+        renew_cookie(response, request)
+        return response
+
+    def renew_cookie(response, request):
+        response.set_cookie("ai_session", request["session"], max_age=SESSION_LIFETIME,
+                            httponly=True, samesite="Strict", secure=request.scheme == "https")
 
     def connection(project):
         if not PROJECT.fullmatch(project):
@@ -155,17 +180,17 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
         if "." in Path(relative).name or relative.startswith(("agent/", "api/", "sockets", "canvas/")):
             raise web.HTTPNotFound()
         content = (assets / "index.html").read_text()
-        content = content.replace("</head>", "<script>window.__AGENT_CANVAS_DO_NOT_TRACK__=true;</script></head>", 1)
+        content = content.replace("</head>", ACTIVITY_SCRIPT + "</head>", 1)
         response = web.Response(text=content, content_type="text/html")
         environ = {"HTTP_" + key.upper().replace("-", "_"): value for key, value in request.headers.items()}
         if foreground_navigation(environ):
             await asyncio.to_thread(owner.dashboard, digest(request["session"]), renew=True)
-            response.set_cookie("ai_session", request["session"], max_age=SESSION_LIFETIME,
-                                httponly=True, samesite="Strict", secure=request.scheme == "https")
+            renew_cookie(response, request)
         return response
 
     app = web.Application(middlewares=[authenticated], client_max_size=16 * 1024 * 1024)
     app.router.add_get("/canvas/open/{project}", open_project)
+    app.router.add_post("/canvas/activity", activity)
     app.router.add_route("*", "/agent/{project}/{path:.*}", proxy)
     app.router.add_route("*", "/{path:.*}", static)
     return app
