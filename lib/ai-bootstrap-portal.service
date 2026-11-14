@@ -16,6 +16,7 @@ UMask=0077
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=strict
+ReadWritePaths=/var/lib/ai-rules
 PrivateTmp=yes
 RestrictAddressFamilies=AF_UNIX
 # Request paths contain enrollment tokens and must not reach the journal.
