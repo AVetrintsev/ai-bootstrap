@@ -372,6 +372,7 @@ configure_codex() {
         memory_generation=$(cat "$project_dir/memory-generation")
     fi
     generation="$memory_generation:$(sha256sum /usr/local/libexec/ai-bootstrap/codex_service.py \
+        /usr/local/libexec/ai-bootstrap/shared_rules.py \
         /usr/local/libexec/ai-bootstrap/codex-executor.py /usr/local/libexec/ai-bootstrap/codex-project.py \
         /etc/systemd/system/ai-bootstrap-codex-project@.service \
         /etc/systemd/system/ai-bootstrap-codex-executor@.service /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)"

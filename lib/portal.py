@@ -502,7 +502,8 @@ class Portal:
         try:
             if action:
                 form = submitted_form(environ, max_fields=5, max_length=50000)
-                if not hmac.compare_digest(form.get('csrf', ''), csrf):
+                submitted_csrf = form.get('csrf', '')
+                if not re.fullmatch(r'[0-9a-f]{64}', submitted_csrf) or not hmac.compare_digest(submitted_csrf, csrf):
                     return respond(start_response, HTTPStatus.FORBIDDEN, 'Недействительная форма. Обновите страницу.\n')
                 fields = {'csrf', 'content'} if action == 'add' else {'csrf', 'id', 'revision', 'content'}
                 if action == 'delete':
