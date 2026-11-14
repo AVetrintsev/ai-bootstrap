@@ -12,15 +12,17 @@ import uuid
 
 from playwright.sync_api import sync_playwright
 
-if os.geteuid() != 0 or len(sys.argv) not in (3, 4, 5):
-    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex] [shell|mcp|project-tools|memory]")
+if os.geteuid() != 0 or len(sys.argv) not in (3, 4, 5, 6):
+    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex] [shell|mcp|project-tools|memory|shared-memory UUID]")
 project, chromium = sys.argv[1:3]
 agent = sys.argv[3] if len(sys.argv) >= 4 else 'qwen'
-tool = sys.argv[4] if len(sys.argv) == 5 else 'shell'
+tool = sys.argv[4] if len(sys.argv) >= 5 else 'shell'
 if agent not in ('qwen', 'codex'):
     sys.exit('Expected qwen or codex')
-if tool not in ('shell', 'mcp', 'project-tools', 'memory') or (tool == 'mcp' and agent != 'codex'):
+if tool not in ('shell', 'mcp', 'project-tools', 'memory', 'shared-memory') or (tool == 'mcp' and agent != 'codex'):
     sys.exit('MCP acceptance requires Codex and its temporary probe fixture')
+if (tool == 'shared-memory') != (len(sys.argv) == 6):
+    sys.exit('Shared memory acceptance requires an approved UUID')
 session = secrets.token_urlsafe(32)
 token_hash = hashlib.sha256(session.encode()).digest()
 database = "/var/lib/ai-portal/portal.sqlite3"
@@ -37,11 +39,15 @@ with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
                (token_hash, now + 1800, "Canvas acceptance", now, now))
 try:
-    if tool == 'memory':
-        from memory_probe import MemoryClient
+    if tool in ('memory', 'shared-memory'):
+        from memory_probe import MemoryClient, has_memory_record
         memory = MemoryClient(project)
-        seed = memory.call('add_memory', name=fixture_symbol,
-                           episode_body='The project acceptance color is purple.')
+        if tool == 'shared-memory':
+            seed = memory.call('get_shared_memory', uuid=sys.argv[5])
+            fixture_symbol = seed['name']
+        else:
+            seed = memory.call('add_memory', name=fixture_symbol,
+                               episode_body='The project acceptance color is purple.')
     if tool == 'project-tools':
         subprocess.run(['ai-sandbox', 'shell', project, 'python3', '-c',
             'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', fixture_path,
@@ -69,7 +75,7 @@ try:
             page.reload()
         row.get_by_role("link", name="Открыть" if agent == 'codex' else "Qwen Code", exact=True).click()
         page.get_by_test_id("chat-input").wait_for(timeout=90000)
-        if tool in ('project-tools', 'memory'):
+        if tool in ('project-tools', 'memory', 'shared-memory'):
             # Keep test runs independent of existing conversations and their pending turns.
             profiles = page.request.get(f'http://localhost:8080/agent/{project}/api/agent-profiles').json()['profiles']
             profile = next(p for p in profiles if p['name'] == ('codex-subscription' if agent == 'codex' else 'qwen-code'))
@@ -96,6 +102,11 @@ try:
             prompt = (f'Call Graphiti get_episode with uuid="{seed["uuid"]}". Then call Graphiti add_memory '
                       f'with name="{fixture_symbol}" and episode_body="Canvas memory reference: {marker}.". '
                       'Use only these MCP tools, then reply DONE.')
+        if tool == 'shared-memory':
+            prompt = (f'Call Graphiti get_shared_memory with uuid="{seed["uuid"]}". Then call Graphiti '
+                      f'propose_shared_memory with name="{fixture_symbol}" and '
+                      f'episode_body="Canvas shared-memory proposal: {marker}.". '
+                      'Use only these MCP tools. Proposing does not publish the text. Then reply DONE.')
         def has_symbol(value):
             if isinstance(value, str):
                 try:
@@ -108,18 +119,20 @@ try:
             return isinstance(value, list) and any(has_symbol(v) for v in value)
 
         def has_tool(transcript):
-            if tool in ('project-tools', 'memory'):
-                expected = {'get_episode', 'add_memory'} if tool == 'memory' else {'get_symbols_overview', 'find_code'}
+            if tool in ('project-tools', 'memory', 'shared-memory'):
+                expected = ({'get_shared_memory', 'propose_shared_memory'} if tool == 'shared-memory' else
+                            {'get_episode', 'add_memory'} if tool == 'memory' else {'get_symbols_overview', 'find_code'})
                 completed = set()
                 def inspect(value):
                     if isinstance(value, dict):
                         if (value.get('tool_call_id') and value.get('source') == 'agent' and
                                 value.get('status') == 'completed' and not value.get('is_error')):
                             output = value.get('raw_output') or value.get('content')
-                            if has_symbol(output):
-                                for name in expected:
-                                    if name in value.get('title', ''):
-                                        completed.add(name)
+                            for name in expected:
+                                if name in value.get('title', '') and (
+                                        has_memory_record(output, seed) if name == 'get_shared_memory'
+                                        else has_symbol(output)):
+                                    completed.add(name)
                         for child in value.values():
                             inspect(child)
                     elif isinstance(value, list):
@@ -137,9 +150,11 @@ try:
         frames.clear()
         page.get_by_test_id("chat-input").press("Enter")
         # Startup may take 120s; the Codex bridge allows a 600s model turn.
-        deadline = time.monotonic() + (720 if tool in ('project-tools', 'memory') else 240)
+        deadline = time.monotonic() + (720 if tool in ('project-tools', 'memory', 'shared-memory') else 240)
         while time.monotonic() < deadline:
-            if memory:
+            if tool == 'shared-memory':
+                confirmed = True  # Both completed MCP results are checked in the browser events below.
+            elif memory:
                 confirmed = any(marker in item['content'] for item in memory.call('get_episodes')['episodes'])
             else:
                 result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
@@ -154,7 +169,7 @@ try:
                 approval.first.click()
             page.wait_for_timeout(2000)
         else:
-            if tool in ('project-tools', 'memory'):
+            if tool in ('project-tools', 'memory', 'shared-memory'):
                 with open('/tmp/' + marker + '-events.json', 'w') as output:
                     json.dump([frame.decode() if isinstance(frame, bytes) else frame for frame in frames], output)
             print("Canvas failure:", page.locator("body").inner_text())
@@ -165,7 +180,8 @@ try:
         assert has_tool(transcript), "No matching agent tool in Canvas"
         assert frames, "No live WebSocket events"
         print("WebSocket events:", len(frames))
-        print(f"OK {agent} read and wrote project memory via MCP" if memory else
+        print(f"OK {agent} read approved shared memory and proposed a new record via MCP" if tool == 'shared-memory' else
+              f"OK {agent} read and wrote project memory via MCP" if memory else
               f"OK {agent} wrote the marker in the same checkout used by ai-sandbox shell")
         screenshot = "/tmp/" + marker + ".png"
         page.screenshot(path=screenshot, full_page=True)
@@ -211,9 +227,10 @@ try:
 finally:
     if memory:
         try:
-            for episode in memory.call('get_episodes', num_results=20)['episodes']:
-                if episode['name'] == fixture_symbol:
-                    memory.call('delete_episode', uuid=episode['uuid'])
+            if tool == 'memory':
+                for episode in memory.call('get_episodes', num_results=20)['episodes']:
+                    if episode['name'] == fixture_symbol:
+                        memory.call('delete_episode', uuid=episode['uuid'])
         finally:
             memory.close()
     if test_conversation:

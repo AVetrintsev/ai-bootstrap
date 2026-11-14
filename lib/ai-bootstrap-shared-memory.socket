@@ -1,0 +1,12 @@
+[Unit]
+Description=Shared memory interface for trusted project services
+
+[Socket]
+ListenStream=/run/ai-bootstrap-shared-memory.sock
+SocketGroup=ai-memory
+SocketMode=0660
+FileDescriptorName=agents
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
