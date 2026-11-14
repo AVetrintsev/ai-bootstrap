@@ -112,7 +112,14 @@ def provision(config, state, project):
             "models": policy["models"], "max_output_tokens": policy["max_output_tokens"]}
 
 
+class GatewayServer(ThreadingHTTPServer):
+    config: Path
+    state: Path
+    rules_path: Path
+
+
 class Handler(BaseHTTPRequestHandler):
+    server: GatewayServer
     protocol_version = "HTTP/1.0"
     server_version = "AIModelGateway"
     sys_version = ""
@@ -258,7 +265,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def make_server(config, state, address, *, rules_path=RULES_PATH):
     configuration(config)
-    server = ThreadingHTTPServer(address, Handler)
+    server = GatewayServer(address, Handler)
     server.config = Path(config)
     server.state = Path(state)
     server.rules_path = Path(rules_path)

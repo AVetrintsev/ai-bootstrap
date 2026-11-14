@@ -280,12 +280,18 @@ configure_sandbox() {
     done < <(getent passwd)
 }
 
+configure_shared_rules() {
+    service_account ai-portal "$portal_state"
+    install -d -o ai-portal -g ai-portal -m 0755 /var/lib/ai-rules
+    publish "$release/lib/shared_rules.py" "$libexec/shared_rules.py" 644
+    quiet 'could not initialize shared rules' runuser -u ai-portal -- python3 -I "$libexec/shared_rules.py"
+}
+
 configure_model_gateway() {
     service_account ai-models /var/lib/ai-models
     install -d -o ai-models -g ai-models -m 0700 /var/lib/ai-models
     install -d -o root -g ai-models -m 0750 "$etc/model-keys"
     publish "$release/lib/model_gateway.py" "$libexec/model_gateway.py" 644
-    publish "$release/lib/shared_rules.py" "$libexec/shared_rules.py" 644
     publish "$release/lib/model-key.py" /usr/local/sbin/ai-model-key 755
     publish "$release/lib/qwen-setup.sh" "$libexec/qwen-setup.sh" 644
     publish "$release/lib/qwen-launcher" "$libexec/qwen-launcher" 755
@@ -479,9 +485,6 @@ configure_github_projects() {
 configure_portal() {
     service_account ai-portal "$portal_state"
     install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
-    install -d -o ai-portal -g ai-portal -m 0755 /var/lib/ai-rules
-    publish "$release/lib/shared_rules.py" "$libexec/shared_rules.py" 644
-    quiet 'could not initialize shared rules' runuser -u ai-portal -- python3 -I "$libexec/shared_rules.py"
     configure_shared_memory
     configure_canvas
     configure_codex
@@ -565,6 +568,7 @@ if [[ $sandbox_enabled == yes ]]; then
     run_step sandbox_packages
 fi
 run_step configure_sandbox
+run_step configure_shared_rules
 run_step configure_model_gateway
 run_step configure_memory
 if [[ $portal_transport == local-http ]]; then
