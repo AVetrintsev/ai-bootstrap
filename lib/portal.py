@@ -28,7 +28,7 @@ from qrcode.image.svg import SvgPathFillImage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shared_memory_client import OWNER_SOCKET, request as shared_memory_request
-from shared_rules import RULES_PATH, RULE_LIMIT, Rules, RuleConflict
+from shared_rules import RULES_PATH, RULE_LIMIT, TOTAL_LIMIT, Rules, RuleConflict
 
 MEMORY_STYLE = '.memory{max-width:72ch;margin:1.5rem auto;padding:0 1rem;line-height:1.5}.memory pre,.memory h2{white-space:pre-wrap;overflow-wrap:anywhere}.memory pre,.memory code{font:inherit}.memory article{margin:2rem 0}.memory button{padding:.6rem 1rem}.memory input:focus-visible,.memory button:focus-visible,.memory a:focus-visible{outline:2px solid;outline-offset:3px}'
 MEMORY_STYLE_HASH = base64.b64encode(hashlib.sha256(MEMORY_STYLE.encode()).digest()).decode()
@@ -541,7 +541,7 @@ class Portal:
         content += (f'<section aria-labelledby="add-rule"><h2 id="add-rule">Добавить правило</h2>'
                     f'<form method="post" action="/rules/add">{hidden}<label for="new-rule">Текст нового правила</label>'
                     f'<textarea id="new-rule" name="content" rows="4" maxlength="{RULE_LIMIT}" required aria-describedby="rule-limit"></textarea>'
-                    '<p id="rule-limit">До 4000 символов в правиле, до 16000 символов во всём списке.</p>'
+                    f'<p id="rule-limit">До {RULE_LIMIT} символов в правиле, до {TOTAL_LIMIT} символов во всём списке.</p>'
                     '<button>Добавить правило</button></form></section><h2>Действующие правила</h2>')
         if not rules:
             content += '<p>Общих правил пока нет. Добавьте первое правило выше.</p>'

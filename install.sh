@@ -285,11 +285,10 @@ configure_model_gateway() {
     install -d -o ai-models -g ai-models -m 0700 /var/lib/ai-models
     install -d -o root -g ai-models -m 0750 "$etc/model-keys"
     publish "$release/lib/model_gateway.py" "$libexec/model_gateway.py" 644
+    publish "$release/lib/shared_rules.py" "$libexec/shared_rules.py" 644
     publish "$release/lib/model-key.py" /usr/local/sbin/ai-model-key 755
     publish "$release/lib/qwen-setup.sh" "$libexec/qwen-setup.sh" 644
     publish "$release/lib/qwen-launcher" "$libexec/qwen-launcher" 755
-    install -d -m 0755 "$libexec/github-sandbox"
-    publish "$release/lib/rules_client.py" "$libexec/github-sandbox/rules_client.py" 644
     publish "$release/lib/ai-bootstrap-models.service" /etc/systemd/system/ai-bootstrap-models.service 644
     quiet 'could not load model gateway unit' systemctl daemon-reload
     if [[ $(cat "$work/model-gateway.json") == null ]]; then

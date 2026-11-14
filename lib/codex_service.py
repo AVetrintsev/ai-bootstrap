@@ -320,9 +320,7 @@ class ProjectSession:
                 raise ValueError('Недействительный запрос.')
             if not isinstance(params, dict):
                 raise ValueError('Ожидается объект параметров.')
-            if method == 'platform/rules' and not params:
-                result = {'text': self.rules.instructions()}
-            elif method == 'initialize':
+            if method == 'initialize':
                 result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True},
                           'agentInfo': {'name': 'ai-bootstrap-codex', 'version': '1'}, 'authMethods': []}
             elif method in ('session/new', 'session/load'):
@@ -368,16 +366,10 @@ async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=A
         session = ProjectSession(project, writer, state=state, binary=binary, api_key=api_key, rules_path=rules_path) if project else None
         active = None
         try:
-            line = await asyncio.wait_for(reader.readline(), 5)
-            message = json.loads(line)
-            if not isinstance(message, dict):
-                return
-            # Qwen can read its startup rules even while both Codex slots are busy.
-            # This request never starts a model process or accepts writes.
-            if session and message.get('method') == 'platform/rules':
-                await session.handle(message)
-                return
             if slots.locked():
+                message = json.loads(await asyncio.wait_for(reader.readline(), 5))
+                if not isinstance(message, dict):
+                    return
                 reason = 'Слишком много открытых сеансов Codex. Закройте один из них и повторите попытку.'
                 if control:
                     writer.write(json.dumps({'error': reason}).encode() + b'\n')
@@ -386,7 +378,7 @@ async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=A
                     await session.send({'id': message.get('id'), 'error': {'code': -32000, 'message': reason}})
                 return
             async with slots:
-                while line:
+                while line := await asyncio.wait_for(reader.readline(), 1800):
                     message = json.loads(line)
                     if not isinstance(message, dict):
                         break
@@ -402,7 +394,6 @@ async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=A
                             await session.send({'id': message['id'], 'error': {'code': -32000, 'message': 'Дождитесь завершения текущего действия.'}})
                     else:
                         active = asyncio.create_task(session.handle(message))
-                    line = await asyncio.wait_for(reader.readline(), 1800)
         except (ValueError, OSError, asyncio.TimeoutError):
             pass
         finally:

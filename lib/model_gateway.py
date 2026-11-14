@@ -16,6 +16,9 @@ import ssl
 import sys
 from urllib.parse import urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shared_rules import RULES_PATH, Rules
+
 
 CONFIG = Path("/etc/ai-bootstrap/model-gateway.json")
 STATE = Path("/var/lib/ai-models")
@@ -152,6 +155,12 @@ class Handler(BaseHTTPRequestHandler):
         authorized = self.authorize()
         if authorized is None:
             return
+        if self.path == '/v1/platform/rules':
+            try:
+                self.reply(200, {'text': Rules(self.server.rules_path).instructions()})
+            except (OSError, sqlite3.Error):
+                self.error(503, 'rules_unavailable', 'Shared rules are unavailable. Retry after the service is restored.')
+            return
         if self.path != "/v1/models":
             self.error(404, "not_found", "Unknown gateway endpoint.")
             return
@@ -247,11 +256,12 @@ class Handler(BaseHTTPRequestHandler):
             upstream.close()
 
 
-def make_server(config, state, address):
+def make_server(config, state, address, *, rules_path=RULES_PATH):
     configuration(config)
     server = ThreadingHTTPServer(address, Handler)
     server.config = Path(config)
     server.state = Path(state)
+    server.rules_path = Path(rules_path)
     return server
 
 

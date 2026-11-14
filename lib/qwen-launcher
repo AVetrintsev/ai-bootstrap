@@ -4,9 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
-
-sys.path.insert(0, '/usr/local/lib/ai-bootstrap')
-from rules_client import read_rules
+from urllib.request import Request, ProxyHandler, build_opener
 
 try:
     settings = json.loads(Path("/root/.config/ai-bootstrap/model-gateway.json").read_text())
@@ -20,10 +18,27 @@ environment.setdefault("NODE_OPTIONS", "--max-old-space-size=512")
 arguments = sys.argv[1:]
 defaults = []
 try:
-    rules = read_rules()
-except (OSError, ValueError):
+    request = Request(base_url.rstrip('/') + '/platform/rules', headers={'Authorization': 'Bearer ' + settings['api_key']})
+    # Gateway traffic is internal; never send the project key through an ambient proxy.
+    with build_opener(ProxyHandler({})).open(request, timeout=15) as response:
+        rules = json.loads(response.read(262144))['text']
+    if not isinstance(rules, str):
+        raise ValueError('Invalid rules response')
+except (OSError, ValueError, KeyError, TypeError):
     sys.exit('Общие правила недоступны. Повторите запуск после восстановления службы проекта.')
 if rules:
+    # Preserve a caller's additional instructions without duplicate CLI options.
+    remaining = []
+    iterator = iter(arguments)
+    for argument in iterator:
+        if argument == '--append-system-prompt':
+            extra = next(iterator, '')
+            rules += '\n\n' + extra
+        elif argument.startswith('--append-system-prompt='):
+            rules += '\n\n' + argument.split('=', 1)[1]
+        else:
+            remaining.append(argument)
+    arguments = remaining
     defaults += ['--append-system-prompt', rules]
 if not any(arg == "--auth-type" or arg.startswith("--auth-type=") for arg in arguments):
     defaults += ["--auth-type", "openai"]
