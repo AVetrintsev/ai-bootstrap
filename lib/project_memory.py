@@ -80,7 +80,7 @@ class Memory:
         await asyncio.to_thread(self.embedded.close)
 
     async def call(self, name, arguments):
-        async with self.lock, asyncio.timeout(240):
+        async with asyncio.timeout(240), self.lock:
             if name == 'add_memory':
                 result = await self.graph.add_episode(name=arguments['name'],
                     episode_body=arguments['episode_body'], source_description='Project agent memory',
