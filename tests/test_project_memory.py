@@ -16,21 +16,31 @@ import project_memory
 
 class Provider(BaseHTTPRequestHandler):
     def do_POST(self):
+        if getattr(self.server, 'fail', False):
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b'private-provider-key: confidential upstream details')
+            return
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        schema = body['response_format']['json_schema']['schema']
-        fields = schema.get('properties', {})
-        # External model boundary: an episode without named entities is valid.
-        result = {name: [] for name, field in fields.items() if field.get('type') == 'array'}
-        payload = json.dumps({'id': 'completion', 'object': 'chat.completion', 'created': 1,
-            'model': 'test', 'choices': [{'index': 0, 'finish_reason': 'stop',
-                'message': {'role': 'assistant', 'content': json.dumps(result)}}]}).encode()
+        if self.path.endswith('/embeddings'):
+            response = {'data': [{'index': 0, 'embedding': [0.1, 0.2, 0.3], 'object': 'embedding'}],
+                        'model': 'test', 'object': 'list', 'usage': {'prompt_tokens': 1, 'total_tokens': 1}}
+        else:
+            schema = body['response_format']['json_schema']['schema']
+            fields = schema.get('properties', {})
+            # External model boundary: an episode without named entities is valid.
+            result = {name: [] for name, field in fields.items() if field.get('type') == 'array'}
+            response = {'id': 'completion', 'object': 'chat.completion', 'created': 1,
+                'model': 'test', 'choices': [{'index': 0, 'finish_reason': 'stop',
+                    'message': {'role': 'assistant', 'content': json.dumps(result)}}]}
+        payload = json.dumps(response).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
-    def log_message(self, *_):
+    def log_message(self, format, *args):
         pass
 
 
@@ -47,7 +57,7 @@ class MemoryTest(unittest.IsolatedAsyncioTestCase):
             'model': 'test', 'embedding_model': 'test', 'embedding_dimensions': 3}
         self.memory = project_memory.Memory('gh-12', self.root / 'data', self.settings, 'private-provider-key')
         await self.memory.start()
-        self.addAsyncCleanup(self.memory.close)
+        self.addAsyncCleanup(self.close_memory)
         self.socket_path = self.root / 'memory.sock'
         self.listener = socket.socket(socket.AF_UNIX)
         self.listener.bind(str(self.socket_path))
@@ -59,8 +69,11 @@ class MemoryTest(unittest.IsolatedAsyncioTestCase):
         self.server.close()
         await self.server.wait_closed()
 
-    async def call(self, name, arguments):
-        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+    async def close_memory(self):
+        await self.memory.close()
+
+    async def call(self, name, arguments, socket_path=None):
+        reader, writer = await asyncio.open_unix_connection(str(socket_path or self.socket_path))
         try:
             writer.write(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
                 'params': {'protocolVersion': '2025-03-26', 'capabilities': {},
@@ -102,6 +115,76 @@ class MemoryTest(unittest.IsolatedAsyncioTestCase):
                 denied = await self.call(name, args)
                 self.assertTrue(denied.get('isError'), denied)
         self.assertEqual(len(json.loads((await self.call('get_episodes', {}))['content'][0]['text'])['episodes']), 1)
+
+    async def test_deleting_a_memory_makes_it_unavailable(self):
+        added = await self.call('add_memory', {'name': 'Temporary', 'episode_body': 'Discard this note.'})
+        identity = json.loads(added['content'][0]['text'])['uuid']
+        deleted = await self.call('delete_episode', {'uuid': identity})
+        self.assertFalse(deleted.get('isError'), deleted)
+        self.assertTrue((await self.call('get_episode', {'uuid': identity})).get('isError'))
+        self.assertEqual(json.loads((await self.call('get_episodes', {}))['content'][0]['text'])['episodes'], [])
+
+    async def test_other_project_cannot_read_or_delete_memory_even_with_its_uuid(self):
+        other = project_memory.Memory('gh-99', self.root / 'other', self.settings, 'private-provider-key')
+        await other.start()
+        self.addAsyncCleanup(other.close)
+        other_socket = self.root / 'other.sock'
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(other_socket))
+        listener.listen()
+        other_server = await project_memory.serve(listener, other, os.getuid())
+        self.addCleanup(other_server.close)
+        added = await self.call('add_memory', {'name': 'Private', 'episode_body': 'Purple is our secret color.'})
+        identity = json.loads(added['content'][0]['text'])['uuid']
+        for name in ('get_episode', 'delete_episode'):
+            with self.subTest(name=name):
+                self.assertTrue((await self.call(name, {'uuid': identity}, other_socket)).get('isError'))
+        self.assertEqual(json.loads((await self.call('get_episodes', {}, other_socket))['content'][0]['text'])['episodes'], [])
+        self.assertFalse((await self.call('get_episode', {'uuid': identity})).get('isError'))
+
+    async def test_acknowledged_memory_survives_service_restart(self):
+        added = await self.call('add_memory', {'name': 'Persistent', 'episode_body': 'Keep purple across restarts.'})
+        identity = json.loads(added['content'][0]['text'])['uuid']
+        await self.stop_server()
+        await self.memory.close()
+        self.memory = project_memory.Memory('gh-12', self.root / 'data', self.settings, 'private-provider-key')
+        await self.memory.start()
+        self.socket_path.unlink(missing_ok=True)
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(self.socket_path))
+        listener.listen()
+        self.server = await project_memory.serve(listener, self.memory, os.getuid())
+        found = await self.call('get_episode', {'uuid': identity})
+        self.assertFalse(found.get('isError'), found)
+        self.assertEqual(json.loads(found['content'][0]['text'])['content'], 'Keep purple across restarts.')
+
+    async def test_search_is_scoped_to_project_and_rejects_namespace_override(self):
+        empty = await self.call('search_memory_facts', {'query': 'button color'})
+        self.assertFalse(empty.get('isError'), empty)
+        self.assertEqual(json.loads(empty['content'][0]['text']), {'facts': []})
+        denied = await self.call('search_memory_facts', {'query': 'secret', 'group_ids': ['gh-99']})
+        self.assertTrue(denied.get('isError'), denied)
+
+    async def test_provider_failure_does_not_expose_credentials_or_claim_success(self):
+        setattr(self.provider, 'fail', True)
+        failed = await self.call('search_memory_facts', {'query': 'anything'})
+        self.assertTrue(failed.get('isError'), failed)
+        self.assertNotIn('private-provider-key', json.dumps(failed))
+        self.assertNotIn('confidential', json.dumps(failed))
+
+    async def test_socket_rejects_a_different_project_user(self):
+        await self.stop_server()
+        self.socket_path.unlink(missing_ok=True)
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(self.socket_path))
+        listener.listen()
+        self.server = await project_memory.serve(listener, self.memory, os.getuid() + 1)
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        try:
+            self.assertEqual(await asyncio.wait_for(reader.read(), 3), b'')
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
 
 if __name__ == '__main__':

@@ -33,7 +33,16 @@ TOOLS = [
     {'name': 'get_episodes', 'description': 'Read recent memories from this project.',
      'inputSchema': {'type': 'object', 'additionalProperties': False,
         'properties': {'num_results': {'type': 'integer', 'minimum': 1, 'maximum': 20}}}},
+    {'name': 'search_memory_facts', 'description': 'Search facts in this project memory by meaning.',
+     'inputSchema': {'type': 'object', 'additionalProperties': False,
+        'properties': {'query': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
+                       'num_results': {'type': 'integer', 'minimum': 1, 'maximum': 20}},
+        'required': ['query']}},
     {'name': 'get_episode', 'description': 'Read a memory by its UUID within this project.',
+     'inputSchema': {'type': 'object', 'additionalProperties': False,
+        'properties': {'uuid': {'type': 'string', 'pattern': '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'}},
+        'required': ['uuid']}},
+    {'name': 'delete_episode', 'description': 'Delete a memory by its UUID within this project.',
      'inputSchema': {'type': 'object', 'additionalProperties': False,
         'properties': {'uuid': {'type': 'string', 'pattern': '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'}},
         'required': ['uuid']}},
@@ -83,6 +92,15 @@ class Memory:
             if name == 'get_episode':
                 item = await EpisodicNode.get_by_uuid(self.graph.driver, arguments['uuid'])
                 return {'uuid': item.uuid, 'name': item.name, 'content': item.content}
+            if name == 'delete_episode':
+                await self.graph.remove_episode(arguments['uuid'])
+                await self.db.connection.save()
+                return {'deleted': arguments['uuid']}
+            if name == 'search_memory_facts':
+                facts = await self.graph.search(arguments['query'], group_ids=[self.project],
+                                                num_results=int(arguments.get('num_results', 10)))
+                return {'facts': [{'uuid': item.uuid, 'fact': item.fact,
+                                   'episodes': item.episodes} for item in facts]}
             episodes = await self.graph.retrieve_episodes(datetime.now(timezone.utc),
                 last_n=int(arguments.get('num_results', 10)), group_ids=[self.project])
             return {'episodes': [{'uuid': item.uuid, 'name': item.name, 'content': item.content}
