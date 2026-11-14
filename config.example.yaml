@@ -29,6 +29,13 @@ sandbox:
 #   # projects:
 #   #   example: {models: [qwen3.8-flash], requests_per_day: 20, max_output_tokens: 4096}
 
+# Память использует ключ провайдера выбранной модели, только на доверенной стороне VM.
+# Вызовы Graphiti и embeddings тарифицируются провайдером отдельно от подписки Codex.
+# project_memory:
+#   model: qwen3.8-flash
+#   embedding_model: openai/text-embedding-3-small
+#   embedding_dimensions: 1536
+
 mihomo:
   profile: |
     mode: rule

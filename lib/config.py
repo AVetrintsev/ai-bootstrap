@@ -172,6 +172,12 @@ def stage(config_path, work):
         from model_gateway import validate_settings
         gateway = validate_settings(gateway)
 
+    memory = config.get("project_memory")
+    if memory is not None:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from memory_config import validate_settings as validate_memory
+        memory = validate_memory(memory, gateway)
+
     template = Path(__file__).resolve().parent / "firewall.nft"
     rules = template.read_text(encoding="utf-8").replace("@ADMIN_IPV4@", ", ".join(map(str, networks)))
     rules = rules.replace("@SANDBOX_UID_RANGE@", f"{SANDBOX_UID_MIN}-{SANDBOX_UID_MAX}")
@@ -190,6 +196,7 @@ def stage(config_path, work):
     (work / "profile.yaml").write_text(profile, encoding="utf-8")
     (work / "portal-transport").write_text(transport + "\n", encoding="utf-8")
     (work / "model-gateway.json").write_text(json.dumps(gateway) + "\n", encoding="utf-8")
+    (work / "project-memory.json").write_text(json.dumps(memory) + "\n", encoding="utf-8")
     enabled = "yes" if sandbox_enabled else "no"
     (work / "sandbox-settings").write_text(
         f"{enabled} {SANDBOX_UID_MIN} {SANDBOX_UID_MAX}\n", encoding="utf-8"
