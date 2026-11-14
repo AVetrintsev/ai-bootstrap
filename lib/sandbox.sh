@@ -299,6 +299,7 @@ configure_tools() {
         memory_enabled=yes
         systemctl enable --now "ai-bootstrap-memory@$project.socket"
         generation=$(sha256sum /usr/local/libexec/ai-bootstrap/project_memory.py \
+            /usr/local/libexec/ai-bootstrap/shared_memory_client.py \
             /etc/systemd/system/ai-bootstrap-memory@.service /etc/ai-bootstrap/project-memory.json \
             /etc/ai-bootstrap/memory.key /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
         previous=$(cat "$project_dir/memory-generation" 2>/dev/null || true)

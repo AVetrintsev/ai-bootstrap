@@ -23,6 +23,9 @@ from graphiti_core.nodes import EpisodeType, EpisodicNode
 from falkordb.asyncio import FalkorDB
 from redislite.falkordb_client import FalkorDB as EmbeddedFalkorDB
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shared_memory_client import AGENT_SOCKET, SHARED_TOOLS, request as shared_request
+
 
 TOOLS = [
     {'name': 'add_memory', 'description': 'Save a durable memory for this project, shared by Codex and Qwen.',
@@ -46,17 +49,18 @@ TOOLS = [
      'inputSchema': {'type': 'object', 'additionalProperties': False,
         'properties': {'uuid': {'type': 'string', 'pattern': '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'}},
         'required': ['uuid']}},
-]
+] + SHARED_TOOLS
 
 
 class Memory:
-    def __init__(self, project, directory, settings, key):
+    def __init__(self, project, directory, settings, key, *, shared_socket=AGENT_SOCKET):
         if not re.fullmatch(r'gh-[1-9][0-9]{0,18}', project):
             raise ValueError('Invalid project')
         self.project = project
         self.directory = Path(directory)
         self.settings = settings
         self.key = key
+        self.shared_socket = shared_socket
         self.lock = asyncio.Lock()
 
     async def start(self):
@@ -80,6 +84,9 @@ class Memory:
         await asyncio.to_thread(self.embedded.close)
 
     async def call(self, name, arguments):
+        if name in {tool['name'] for tool in SHARED_TOOLS}:
+            return await asyncio.to_thread(shared_request, name, socket_path=self.shared_socket,
+                                           project=self.project, **arguments)
         async with asyncio.timeout(240), self.lock:
             if name == 'add_memory':
                 result = await self.graph.add_episode(name=arguments['name'],

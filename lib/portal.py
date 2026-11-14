@@ -17,6 +17,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import sys
 from threading import BoundedSemaphore
 import time
 from urllib.parse import parse_qs, quote
@@ -25,6 +26,11 @@ from cryptography.fernet import Fernet
 import qrcode
 from qrcode.image.svg import SvgPathFillImage
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shared_memory_client import OWNER_SOCKET, request as shared_memory_request
+
+MEMORY_STYLE = '.memory{max-width:72ch;margin:1.5rem auto;padding:0 1rem}.memory pre{white-space:pre-wrap;overflow-wrap:anywhere}.memory article{margin:2rem 0}.memory button{padding:.6rem 1rem}.memory input:focus-visible,.memory button:focus-visible,.memory a:focus-visible{outline:2px solid;outline-offset:3px}'
+MEMORY_STYLE_HASH = base64.b64encode(hashlib.sha256(MEMORY_STYLE.encode()).digest()).decode()
 
 STATE = Path("/var/lib/ai-portal")
 KEY = Path("/etc/ai-bootstrap/portal.key")
@@ -332,7 +338,8 @@ def respond(start_response, status, body="", content_type="text/plain; charset=u
             ("Cache-Control", "no-store"),
             ("Referrer-Policy", "no-referrer"),
             ("Content-Security-Policy", "default-src 'none'; img-src data:; form-action 'self'; "
-                                        "frame-ancestors 'none'; base-uri 'none'"),
+                                        "frame-ancestors 'none'; base-uri 'none'; "
+                                        f"style-src 'sha256-{MEMORY_STYLE_HASH}'"),
             ("X-Content-Type-Options", "nosniff"),
             *headers,
         ],
@@ -384,10 +391,12 @@ def browser_row(browser, current_hash, csrf):
 
 
 class Portal:
-    def __init__(self, state, key, *, clock=time.time, secure=False, codex_socket="/run/ai-bootstrap-codex.sock"):
+    def __init__(self, state, key, *, clock=time.time, secure=False, codex_socket="/run/ai-bootstrap-codex.sock",
+                 shared_memory_socket=OWNER_SOCKET):
         self.owner = OwnerAccess(state, key, clock)
         self.secure = secure
         self.codex_socket = codex_socket
+        self.shared_memory_socket = shared_memory_socket
 
     def __call__(self, environ, start_response):
         path = environ["PATH_INFO"]
@@ -412,6 +421,8 @@ class Portal:
                     return self.projects(environ, start_response, session, path, method)
             if path in ("/codex", "/codex/login", "/codex/profile") and self.owner.has_session(session):
                 return self.codex(environ, start_response, session, path, method)
+            if path in ("/memory", "/memory/approve") and self.owner.has_session(session):
+                return self.shared_memory(environ, start_response, session, path, method)
             if method == "GET" and self.owner.has_session(session):
                 if path == "/api/status":
                     return respond(start_response, HTTPStatus.OK, '{"status":"ok"}\n', "application/json")
@@ -459,12 +470,68 @@ class Portal:
         page = html_page("ai-bootstrap", f"""
 <p><a href="/projects">Проекты</a></p>
 <p><a href="/codex">Подключение Codex</a></p>
+<p><a href="/memory">Общая память</a></p>
 <p><a href="{link}">Зарегистрировать браузер</a></p>
 <h2>Зарегистрированные браузеры</h2>
 <table><thead><tr><th>Имя</th><th>Регистрация</th><th>Последняя активность</th>
 <th>Срок действия</th><th>Управление</th></tr></thead><tbody>{rows}</tbody></table>""")
         headers = (self.cookie(session),) if renew else ()
         return respond(start_response, HTTPStatus.OK, page, "text/html; charset=utf-8", headers)
+
+    def shared_memory(self, environ, start_response, session, path, method):
+        if (method, path) not in (("GET", "/memory"), ("POST", "/memory/approve")):
+            return respond(start_response, HTTPStatus.NOT_FOUND)
+        csrf = csrf_token(session)
+        back = '<p><a href="/memory">К предложениям</a> · <a href="/">Главная</a></p>'
+        try:
+            if method == 'POST':
+                form = submitted_form(environ, max_fields=4, max_length=1024)
+                if not hmac.compare_digest(form.get('csrf', '').encode(), csrf.encode()):
+                    return respond(start_response, HTTPStatus.FORBIDDEN, 'Недействительная форма. Обновите страницу.\n')
+                if (set(form) != {'csrf', 'uuid', 'revision', 'confirm'} or form['confirm'] != 'yes'
+                        or not re.fullmatch(r'[0-9a-f-]{36}', form['uuid'])
+                        or not re.fullmatch(r'[0-9a-f]{64}', form['revision'])):
+                    return respond(start_response, HTTPStatus.BAD_REQUEST, 'Подтвердите публикацию показанного текста.\n')
+                shared_memory_request('approve_proposal', socket_path=self.shared_memory_socket,
+                                      uuid=form['uuid'], revision=form['revision'])
+                content = '<p>Запись опубликована. Теперь она доступна Codex и Qwen во всех проектах.</p>' + back
+                title = 'Запись опубликована'
+            else:
+                query = environ.get('QUERY_STRING', '')
+                if len(query) > 100:
+                    return respond(start_response, HTTPStatus.BAD_REQUEST)
+                try:
+                    values = parse_qs(query, max_num_fields=1, strict_parsing=True)
+                    after = int(values.get('after', ['0'])[0])
+                    if set(values) - {'after'} or not 0 <= after <= 9223372036854775807:
+                        raise ValueError
+                except ValueError:
+                    return respond(start_response, HTTPStatus.BAD_REQUEST)
+                result = shared_memory_request('list_proposals', socket_path=self.shared_memory_socket, after=after)
+                content = '<p><a href="/">Главная</a></p><p>Проверьте точный текст. После публикации его увидят оба агента во всех проектах.</p>'
+                for item in result['proposals']:
+                    content += f'''<article aria-labelledby="proposal-{item['uuid']}">
+<h2 id="proposal-{item['uuid']}"><span>{escape(item['name'])}</span></h2>
+<p>Предложение из проекта <strong>{escape(item['project'])}</strong></p>
+<pre><code>{escape(item['content'])}</code></pre>
+<form method="post" action="/memory/approve">
+<input type="hidden" name="csrf" value="{csrf}">
+<input type="hidden" name="uuid" value="{item['uuid']}">
+<input type="hidden" name="revision" value="{item['revision']}">
+<button name="confirm" value="yes">Опубликовать этот текст</button></form></article>'''
+                if not result['proposals']:
+                    content += '<p>Предложений для публикации нет. Агент может предложить запись во время работы над проектом.</p>'
+                if result['next_after'] is not None:
+                    content += f'<p><a href="/memory?after={result["next_after"]}">Следующие предложения</a></p>'
+                if after:
+                    content += '<p><a href="/memory">К первым предложениям</a></p>'
+                title = 'Общая память'
+        except (OSError, ValueError):
+            return respond(start_response, HTTPStatus.SERVICE_UNAVAILABLE,
+                html_page('Общая память', '<p>Не удалось выполнить действие. Проверьте доступность памяти и повторите попытку.</p>' + back),
+                'text/html; charset=utf-8')
+        page = html_page(title, f'<style>{MEMORY_STYLE}</style><main class="memory">{content}</main>')
+        return respond(start_response, HTTPStatus.OK, page, 'text/html; charset=utf-8')
 
     def codex(self, environ, start_response, session, path, method):
         action = {("GET", "/codex"): "status", ("POST", "/codex/login"): "login",

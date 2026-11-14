@@ -314,6 +314,8 @@ configure_memory() {
     install -d -m 0755 "$libexec/github-sandbox"
     publish "$release/lib/memory-client" "$libexec/github-sandbox/memory-client" 755
     publish "$release/lib/project_memory.py" "$libexec/project_memory.py" 644
+    publish "$release/lib/shared_memory_client.py" "$libexec/shared_memory_client.py" 644
+    publish "$release/lib/shared_memory.py" "$libexec/shared_memory.py" 644
     for unit in ai-bootstrap-memory@.socket ai-bootstrap-memory@.service; do
         publish "$release/lib/$unit" "/etc/systemd/system/$unit" 644
     done
@@ -351,6 +353,24 @@ configure_memory() {
     publish "$key_source" "$etc/memory.key" 600
     publish "$work/project-memory.json" "$etc/project-memory.json" 640 ai-memory
     skip_reason=
+}
+
+configure_shared_memory() {
+    local unit
+    for unit in ai-bootstrap-shared-memory.socket ai-bootstrap-shared-memory-owner.socket \
+                ai-bootstrap-shared-memory.service; do
+        publish "$release/lib/$unit" "/etc/systemd/system/$unit" 644
+    done
+    systemctl daemon-reload
+    if [[ ! -f $etc/project-memory.json ]]; then
+        systemctl disable --now ai-bootstrap-shared-memory.socket ai-bootstrap-shared-memory-owner.socket
+        systemctl stop ai-bootstrap-shared-memory.service
+        return
+    fi
+    systemctl enable --now ai-bootstrap-shared-memory.socket ai-bootstrap-shared-memory-owner.socket
+    systemctl restart ai-bootstrap-shared-memory.service
+    quiet 'shared memory is not ready' runuser -u ai-portal -- python3 -I -c \
+        'import sys; sys.path.insert(0, sys.argv[1]); from shared_memory_client import request, OWNER_SOCKET; request("list_proposals", socket_path=OWNER_SOCKET)' "$libexec"
 }
 
 portal_admin() {
@@ -458,6 +478,7 @@ configure_github_projects() {
 configure_portal() {
     service_account ai-portal "$portal_state"
     install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
+    configure_shared_memory
     configure_canvas
     configure_codex
     configure_github_projects

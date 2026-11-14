@@ -1,0 +1,27 @@
+[Unit]
+Description=Owner-approved shared Graphiti memory
+Requires=ai-bootstrap-shared-memory.socket ai-bootstrap-shared-memory-owner.socket
+After=ai-bootstrap-shared-memory.socket ai-bootstrap-shared-memory-owner.socket
+
+[Service]
+User=ai-memory
+ExecStart=/opt/ai-memory/bin/python -I /usr/local/libexec/ai-bootstrap/shared_memory.py
+Sockets=ai-bootstrap-shared-memory.socket ai-bootstrap-shared-memory-owner.socket
+StateDirectory=ai-memory
+StateDirectoryMode=0700
+RuntimeDirectory=ai-shared-memory
+RuntimeDirectoryMode=0700
+Environment=GRAPHITI_TELEMETRY_ENABLED=false OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/var/lib/ai-memory
+TasksMax=32
+MemoryMax=256M
+KillMode=control-group
+TimeoutStopSec=30
+StandardOutput=null
+StandardError=null

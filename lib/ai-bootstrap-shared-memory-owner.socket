@@ -1,0 +1,13 @@
+[Unit]
+Description=Shared memory approval interface for the owner portal
+
+[Socket]
+ListenStream=/run/ai-bootstrap-shared-memory-owner.sock
+SocketGroup=ai-portal
+SocketMode=0660
+FileDescriptorName=owner
+Service=ai-bootstrap-shared-memory.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
