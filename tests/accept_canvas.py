@@ -13,13 +13,13 @@ import uuid
 from playwright.sync_api import sync_playwright
 
 if os.geteuid() != 0 or len(sys.argv) not in (3, 4, 5):
-    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex] [shell|mcp|project-tools]")
+    sys.exit("Usage: sudo PYTHON tests/accept_canvas.py PROJECT CHROMIUM [qwen|codex] [shell|mcp|project-tools|memory]")
 project, chromium = sys.argv[1:3]
 agent = sys.argv[3] if len(sys.argv) >= 4 else 'qwen'
 tool = sys.argv[4] if len(sys.argv) == 5 else 'shell'
 if agent not in ('qwen', 'codex'):
     sys.exit('Expected qwen or codex')
-if tool not in ('shell', 'mcp', 'project-tools') or (tool == 'mcp' and agent != 'codex'):
+if tool not in ('shell', 'mcp', 'project-tools', 'memory') or (tool == 'mcp' and agent != 'codex'):
     sys.exit('MCP acceptance requires Codex and its temporary probe fixture')
 session = secrets.token_urlsafe(32)
 token_hash = hashlib.sha256(session.encode()).digest()
@@ -32,10 +32,16 @@ fixture_path = '/workspace/repo/' + fixture_symbol + '.ts'
 executor_stopped = False
 test_conversation = None
 context = None
+memory = None
 with sqlite3.connect(database) as db:
     db.execute("INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)",
                (token_hash, now + 1800, "Canvas acceptance", now, now))
 try:
+    if tool == 'memory':
+        from memory_probe import MemoryClient
+        memory = MemoryClient(project)
+        seed = memory.call('add_memory', name=fixture_symbol,
+                           episode_body='The project acceptance color is purple.')
     if tool == 'project-tools':
         subprocess.run(['ai-sandbox', 'shell', project, 'python3', '-c',
             'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])', fixture_path,
@@ -63,7 +69,7 @@ try:
             page.reload()
         row.get_by_role("link", name="Открыть" if agent == 'codex' else "Qwen Code", exact=True).click()
         page.get_by_test_id("chat-input").wait_for(timeout=90000)
-        if tool == 'project-tools':
+        if tool in ('project-tools', 'memory'):
             # Keep test runs independent of existing conversations and their pending turns.
             profiles = page.request.get(f'http://localhost:8080/agent/{project}/api/agent-profiles').json()['profiles']
             profile = next(p for p in profiles if p['name'] == ('codex-subscription' if agent == 'codex' else 'qwen-code'))
@@ -86,6 +92,10 @@ try:
                       f'Then use the shell tool to run: cd /workspace/repo && rg {fixture_symbol} {fixture_symbol}.ts '
                       f"&& ast-grep run --lang typescript --pattern 'function $NAME() {{ $$$BODY }}' {fixture_symbol}.ts "
                       f"&& printf '%s' '{marker}' > '{marker_path}'. Do not change other files. Reply DONE.")
+        if tool == 'memory':
+            prompt = (f'Call Graphiti get_episode with uuid="{seed["uuid"]}". Then call Graphiti add_memory '
+                      f'with name="{fixture_symbol}" and episode_body="Canvas memory reference: {marker}.". '
+                      'Use only these MCP tools, then reply DONE.')
         def has_symbol(value):
             if isinstance(value, str):
                 try:
@@ -98,7 +108,8 @@ try:
             return isinstance(value, list) and any(has_symbol(v) for v in value)
 
         def has_tool(transcript):
-            if tool == 'project-tools':
+            if tool in ('project-tools', 'memory'):
+                expected = {'get_episode', 'add_memory'} if tool == 'memory' else {'get_symbols_overview', 'find_code'}
                 completed = set()
                 def inspect(value):
                     if isinstance(value, dict):
@@ -106,7 +117,7 @@ try:
                                 value.get('status') == 'completed' and not value.get('is_error')):
                             output = value.get('raw_output') or value.get('content')
                             if has_symbol(output):
-                                for name in ('get_symbols_overview', 'find_code'):
+                                for name in expected:
                                     if name in value.get('title', ''):
                                         completed.add(name)
                         for child in value.values():
@@ -119,18 +130,22 @@ try:
                         inspect(json.loads(frame))
                     except (ValueError, TypeError):
                         continue
-                return completed == {'get_symbols_overview', 'find_code'}
+                return completed == expected
             return (any(line.strip() == 'probe' for line in transcript.splitlines()) if tool == 'mcp' else
                     any(marker in line and ('Running Shell:' in line or '/bin/bash' in line) for line in transcript.splitlines()))
         page.get_by_test_id("chat-input").fill(prompt)
         frames.clear()
         page.get_by_test_id("chat-input").press("Enter")
         # Startup may take 120s; the Codex bridge allows a 600s model turn.
-        deadline = time.monotonic() + (720 if tool == 'project-tools' else 240)
+        deadline = time.monotonic() + (720 if tool in ('project-tools', 'memory') else 240)
         while time.monotonic() < deadline:
-            result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
-                                    capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            if result.returncode == 0 and result.stdout == marker:
+            if memory:
+                confirmed = any(marker in item['content'] for item in memory.call('get_episodes')['episodes'])
+            else:
+                result = subprocess.run(["ai-sandbox", "shell", project, "cat", marker_path],
+                                        capture_output=True, text=True, stdin=subprocess.DEVNULL)
+                confirmed = result.returncode == 0 and result.stdout == marker
+            if confirmed:
                 transcript = page.locator("body").inner_text()
                 if has_tool(transcript):
                     break
@@ -139,7 +154,7 @@ try:
                 approval.first.click()
             page.wait_for_timeout(2000)
         else:
-            if tool == 'project-tools':
+            if tool in ('project-tools', 'memory'):
                 with open('/tmp/' + marker + '-events.json', 'w') as output:
                     json.dump([frame.decode() if isinstance(frame, bytes) else frame for frame in frames], output)
             print("Canvas failure:", page.locator("body").inner_text())
@@ -150,7 +165,8 @@ try:
         assert has_tool(transcript), "No matching agent tool in Canvas"
         assert frames, "No live WebSocket events"
         print("WebSocket events:", len(frames))
-        print(f"OK {agent} wrote the marker in the same checkout used by ai-sandbox shell")
+        print(f"OK {agent} read and wrote project memory via MCP" if memory else
+              f"OK {agent} wrote the marker in the same checkout used by ai-sandbox shell")
         screenshot = "/tmp/" + marker + ".png"
         page.screenshot(path=screenshot, full_page=True)
         print("Screenshot:", screenshot)
@@ -193,6 +209,13 @@ try:
             test_conversation = None
         browser.close()
 finally:
+    if memory:
+        try:
+            for episode in memory.call('get_episodes', num_results=20)['episodes']:
+                if episode['name'] == fixture_symbol:
+                    memory.call('delete_episode', uuid=episode['uuid'])
+        finally:
+            memory.close()
     if test_conversation:
         # The browser may already be closed on an exception. Use the existing
         # authenticated project API inside the sandbox to stop/delete only our fixture.

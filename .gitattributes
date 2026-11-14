@@ -9,6 +9,7 @@ lib/model-key.py text eol=lf
 lib/codex-client text eol=lf
 lib/codex-api-key text eol=lf
 lib/project-tools-exec text eol=lf
+lib/memory-client text eol=lf
 *.Containerfile text eol=lf
 *.py text eol=lf
 release.env text eol=lf

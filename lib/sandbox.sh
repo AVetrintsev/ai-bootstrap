@@ -294,6 +294,20 @@ configure_search() {
 
 configure_tools() {
     local image=$project_dir/disk.ext4 loop generation previous
+    local memory_enabled=no
+    if [[ -f /etc/ai-bootstrap/project-memory.json ]]; then
+        memory_enabled=yes
+        systemctl enable --now "ai-bootstrap-memory@$project.socket"
+        generation=$(sha256sum /usr/local/libexec/ai-bootstrap/project_memory.py \
+            /etc/systemd/system/ai-bootstrap-memory@.service /etc/ai-bootstrap/project-memory.json \
+            /etc/ai-bootstrap/memory.key /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
+        previous=$(cat "$project_dir/memory-generation" 2>/dev/null || true)
+        if [[ $generation != "$previous" ]]; then
+            systemctl try-restart "ai-bootstrap-memory@$project.service"
+        fi
+        as_project podman exec project python3 -I /usr/local/lib/ai-bootstrap/memory-client --check
+        printf '%s' "$generation" > "$project_dir/memory-generation"
+    fi
     # Grow in place: preserve the rootless container, packages and all project files.
     if [[ $(stat -c %s "$image") -lt 8589934592 ]]; then
         fallocate -l 8G "$image"
@@ -304,7 +318,7 @@ configure_tools() {
     resize2fs "$loop" >/dev/null
     source /etc/ai-bootstrap/sandbox-release.env
     configure_search
-    as_project podman exec --interactive project bash -s -- "$SERENA_VERSION" "$CODEGRAPHCONTEXT_VERSION" \
+    as_project podman exec --interactive project bash -s -- "$SERENA_VERSION" "$CODEGRAPHCONTEXT_VERSION" "$memory_enabled" \
         < /usr/local/libexec/ai-bootstrap/project-tools-setup.sh
     generation=$(sha256sum /usr/local/libexec/ai-bootstrap/project-graph.py \
         /usr/local/libexec/ai-bootstrap/codegraph-worker.py \
@@ -334,7 +348,7 @@ configure_tools() {
 configure_codex() {
     [[ -x /opt/ai-codex/bin/codex ]] || die 'install Codex on the platform before connecting Canvas'
     source /etc/ai-bootstrap/sandbox-release.env
-    local installed generation previous
+    local installed generation previous memory_generation=disabled
     installed=$(as_project podman exec project cat /opt/ai-codex/ai-bootstrap-version 2>/dev/null || true)
     if [[ $installed != "$CODEX_VERSION:$CODEX_SHA256" ]]; then
         as_project podman exec project sh -eu -c 'rm -rf /opt/ai-codex.next; install -d -m 0755 /opt/ai-codex.next'
@@ -353,10 +367,13 @@ configure_codex() {
         systemctl stop "ai-bootstrap-codex-project@$project.socket" "ai-bootstrap-codex-project@$project.service"
     fi
     runuser -u ai-codex -- python3 -I /usr/local/libexec/ai-bootstrap/codex-project.py "$project"
-    generation=$(sha256sum /usr/local/libexec/ai-bootstrap/codex_service.py \
+    if [[ -f /etc/ai-bootstrap/project-memory.json ]]; then
+        memory_generation=$(cat "$project_dir/memory-generation")
+    fi
+    generation="$memory_generation:$(sha256sum /usr/local/libexec/ai-bootstrap/codex_service.py \
         /usr/local/libexec/ai-bootstrap/codex-executor.py /usr/local/libexec/ai-bootstrap/codex-project.py \
         /etc/systemd/system/ai-bootstrap-codex-project@.service \
-        /etc/systemd/system/ai-bootstrap-codex-executor@.service /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)
+        /etc/systemd/system/ai-bootstrap-codex-executor@.service /etc/ai-bootstrap/sandbox-release.env | sha256sum | cut -d ' ' -f 1)"
     previous=$(cat "$project_dir/codex-generation" 2>/dev/null || true)
     systemctl enable --now "ai-bootstrap-codex-executor@$project.socket" "ai-bootstrap-codex-project@$project.socket"
     if [[ $previous != "$generation" ]]; then
@@ -441,6 +458,11 @@ github_delete() {
         systemctl disable --now "ai-bootstrap-codex-project@$project.socket" "ai-bootstrap-codex-executor@$project.socket"
         systemctl stop "ai-bootstrap-codex-project@$project.service" "ai-bootstrap-codex-executor@$project.service"
         rm -rf -- "/var/lib/ai-codex/projects/$project"
+    fi
+    if [[ -f /etc/systemd/system/ai-bootstrap-memory@.socket ]]; then
+        systemctl disable --now "ai-bootstrap-memory@$project.socket"
+        systemctl stop "ai-bootstrap-memory@$project.service"
+        rm -rf -- "/var/lib/ai-memory/$project"
     fi
     if ! id "$user" >/dev/null 2>&1; then
         [[ ! -e $project_dir/disk.ext4 ]] && ! mountpoint -q -- "$disk" || die 'project account is missing'

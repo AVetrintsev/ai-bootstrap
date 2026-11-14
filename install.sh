@@ -309,6 +309,50 @@ configure_model_gateway() {
     fail 'model gateway did not reject an unauthenticated readiness request'
 }
 
+configure_memory() {
+    local unit connection project key_source installed
+    install -d -m 0755 "$libexec/github-sandbox"
+    publish "$release/lib/memory-client" "$libexec/github-sandbox/memory-client" 755
+    publish "$release/lib/project_memory.py" "$libexec/project_memory.py" 644
+    for unit in ai-bootstrap-memory@.socket ai-bootstrap-memory@.service; do
+        publish "$release/lib/$unit" "/etc/systemd/system/$unit" 644
+    done
+    systemctl daemon-reload
+    if [[ $(cat "$work/project-memory.json") == null ]]; then
+        for connection in /var/lib/ai-canvas/connections/gh-*.json; do
+            [[ -f $connection ]] || continue
+            project=${connection##*/}; project=${project%.json}
+            systemctl disable --now "ai-bootstrap-memory@$project.socket"
+            systemctl stop "ai-bootstrap-memory@$project.service"
+        done
+        rm -f -- "$etc/project-memory.json" "$etc/memory.key"
+        skip_reason='project_memory is not configured'
+        return
+    fi
+    ensure_packages python3-venv
+    service_account ai-memory /var/lib/ai-memory
+    install -d -m 0700 -o ai-memory -g ai-memory /var/lib/ai-memory
+    if [[ ! -x /opt/ai-memory/bin/python ]]; then
+        (umask 022; python3 -m venv /opt/ai-memory)
+    fi
+    installed=$(cat /opt/ai-memory/ai-bootstrap-version 2>/dev/null || true)
+    if [[ $installed != "$GRAPHITI_VERSION:$FALKORDBLITE_VERSION:$MEMORY_JSONSCHEMA_VERSION:$MEMORY_HTTPX_VERSION" ]]; then
+        (umask 022; quiet 'could not install pinned Graphiti and FalkorDB' /opt/ai-memory/bin/pip install \
+            --disable-pip-version-check --no-cache-dir "graphiti-core[falkordblite]==$GRAPHITI_VERSION" \
+            "falkordblite==$FALKORDBLITE_VERSION" "jsonschema==$MEMORY_JSONSCHEMA_VERSION" "httpx==$MEMORY_HTTPX_VERSION")
+        printf '%s' "$GRAPHITI_VERSION:$FALKORDBLITE_VERSION:$MEMORY_JSONSCHEMA_VERSION:$MEMORY_HTTPX_VERSION" > /opt/ai-memory/ai-bootstrap-version
+    fi
+    # Repair releases installed under the installer's private umask. No secrets live here.
+    chmod -R a+rX /opt/ai-memory
+    (cd /; quiet 'Graphiti runtime is not usable by ai-memory' runuser -u ai-memory -- \
+        /opt/ai-memory/bin/python -I -c 'from graphiti_core import Graphiti; from redislite.falkordb_client import FalkorDB')
+    key_source=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["key_file"])' "$work/project-memory.json")
+    [[ -f $key_source && ! -L $key_source ]] || fail 'project memory provider key is missing or not a regular file'
+    publish "$key_source" "$etc/memory.key" 600
+    publish "$work/project-memory.json" "$etc/project-memory.json" 640 ai-memory
+    skip_reason=
+}
+
 portal_admin() {
     runuser -u ai-portal -- /usr/bin/python3 -I "$libexec/portal.py" "$@"
 }
@@ -497,6 +541,7 @@ if [[ $sandbox_enabled == yes ]]; then
 fi
 run_step configure_sandbox
 run_step configure_model_gateway
+run_step configure_memory
 if [[ $portal_transport == local-http ]]; then
     run_step portal_packages
     run_step configure_portal
