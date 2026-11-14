@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Bridge MCP stdio to this sandbox's host-owned project socket."""
+import select
+import socket
+import sys
+import os
+
+
+def main():
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect('/run/ai-bootstrap-git/memory.sock')
+        inputs = [0, connection]
+        while inputs:
+            ready, _, _ = select.select(inputs, [], [])
+            for source in ready:
+                data = os.read(source if source == 0 else connection.fileno(), 65536)
+                if source == 0:
+                    if data:
+                        connection.sendall(data)
+                    else:
+                        connection.shutdown(socket.SHUT_WR)
+                        inputs.remove(0)
+                elif data:
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                else:
+                    return
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except OSError:
+        sys.exit('Project memory is unavailable; retry after the service is restored.')

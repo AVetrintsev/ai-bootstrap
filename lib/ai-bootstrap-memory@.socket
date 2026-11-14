@@ -1,0 +1,12 @@
+[Unit]
+Description=Project memory MCP interface for %i
+
+[Socket]
+ListenStream=/run/ai-bootstrap-git/%i/memory.sock
+SocketGroup=aisbx-%i
+SocketMode=0660
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

@@ -1,0 +1,26 @@
+[Unit]
+Description=Trusted Graphiti project memory for %i
+Requires=ai-bootstrap-memory@%i.socket
+After=ai-bootstrap-memory@%i.socket
+
+[Service]
+User=ai-memory
+ExecStart=/opt/ai-memory/bin/python -I /usr/local/libexec/ai-bootstrap/project_memory.py %i
+LoadCredential=provider.key:/etc/ai-bootstrap/memory.key
+StateDirectory=ai-memory
+StateDirectoryMode=0700
+RuntimeDirectory=ai-memory-%i
+RuntimeDirectoryMode=0700
+Environment=GRAPHITI_TELEMETRY_ENABLED=false OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/ai-memory
+TasksMax=64
+MemoryMax=512M
+KillMode=control-group
+TimeoutStopSec=30
+StandardOutput=null
+StandardError=null
