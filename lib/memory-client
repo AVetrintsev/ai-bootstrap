@@ -4,6 +4,28 @@ import select
 import socket
 import sys
 import os
+import json
+
+
+def check():
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(90)
+        connection.connect('/run/ai-bootstrap-git/memory.sock')
+        with connection.makefile('rwb') as stream:
+            for identity, method, params in (
+                (1, 'initialize', {'protocolVersion': '2025-03-26', 'capabilities': {},
+                                  'clientInfo': {'name': 'installer', 'version': '1'}}),
+                (2, 'tools/call', {'name': 'get_episodes', 'arguments': {'num_results': 1}}),
+            ):
+                stream.write(json.dumps({'jsonrpc': '2.0', 'id': identity,
+                                         'method': method, 'params': params}).encode() + b'\n')
+                stream.flush()
+                response = json.loads(stream.readline(131072))
+                if 'error' in response or response.get('result', {}).get('isError'):
+                    raise OSError('Memory readiness failed')
+                if identity == 1:
+                    stream.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+                    stream.flush()
 
 
 def main():
@@ -29,6 +51,9 @@ def main():
 
 if __name__ == '__main__':
     try:
-        main()
-    except OSError:
+        if sys.argv[1:] == ['--check']:
+            check()
+        else:
+            main()
+    except (OSError, ValueError):
         sys.exit('Project memory is unavailable; retry after the service is restored.')

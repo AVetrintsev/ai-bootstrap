@@ -21,8 +21,8 @@ for package in "serena:serena-agent:$serena_version" "codegraph:codegraphcontext
     fi
 done
 install -d -m 0700 /root/.qwen /root/.local/share/ai-codegraph /opt/ai-project-tools
-python3 -I - <<'PY'
-import json
+python3 -I - "${3:-no}" <<'PY'
+import json, sys
 from pathlib import Path
 path = Path('/root/.qwen/settings.json')
 settings = json.loads(path.read_text()) if path.exists() else {}
@@ -33,6 +33,11 @@ servers['serena'] = {'command': '/opt/ai-serena/bin/serena', 'args': [
     '--enable-gui-log-window', 'false'], 'timeout': 180000}
 servers['codegraphcontext'] = {'command': '/usr/bin/python3',
     'args': ['-I', '/opt/ai-project-tools/graph.py', 'client'], 'timeout': 180000}
+if sys.argv[1] == 'yes':
+    servers['graphiti'] = {'command': '/usr/bin/python3',
+        'args': ['-I', '/usr/local/lib/ai-bootstrap/memory-client'], 'timeout': 300000}
+else:
+    servers.pop('graphiti', None)
 staged = path.with_suffix('.json.tmp')
 staged.write_text(json.dumps(settings, indent=2) + '\n')
 staged.chmod(0o600)

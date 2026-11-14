@@ -25,6 +25,12 @@ for profile in ('chatgpt', 'api'):
         '[mcp_servers.codegraphcontext]\ncommand = "/usr/bin/python3"\n'
         'args = ["-I", "/opt/ai-project-tools/graph.py", "client"]\n'
         'cwd = "/workspace/repo"\nenvironment_id = "project"\nrequired = true\nstartup_timeout_sec = 120\ntool_timeout_sec = 180\n')
+    if Path('/etc/ai-bootstrap/project-memory.json').is_file():
+        with (home / 'config.toml').open('a') as config:
+            config.write('[mcp_servers.graphiti]\ncommand = "/usr/bin/python3"\n'
+                         'args = ["-I", "/usr/local/lib/ai-bootstrap/memory-client"]\n'
+                         'cwd = "/workspace/repo"\nenvironment_id = "project"\n'
+                         'required = true\nstartup_timeout_sec = 120\ntool_timeout_sec = 300\n')
     if profile == 'chatgpt':
         auth = home / 'auth.json'
         if not auth.is_symlink():

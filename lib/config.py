@@ -177,6 +177,15 @@ def stage(config_path, work):
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from memory_config import validate_settings as validate_memory
         memory = validate_memory(memory, gateway)
+        try:
+            key_fd = os.open(memory['key_file'], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(key_fd, encoding='utf-8') as key_file:
+                key_stat = os.fstat(key_file.fileno())
+                if (not stat.S_ISREG(key_stat.st_mode) or key_stat.st_mode & 0o007
+                        or not key_file.read(16384).strip()):
+                    raise ValueError('project memory provider key must be a nonempty private regular file')
+        except (OSError, UnicodeError):
+            raise ValueError('cannot read project memory provider key') from None
 
     template = Path(__file__).resolve().parent / "firewall.nft"
     rules = template.read_text(encoding="utf-8").replace("@ADMIN_IPV4@", ", ".join(map(str, networks)))
