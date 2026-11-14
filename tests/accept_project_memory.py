@@ -47,10 +47,10 @@ try:
     probe = '''import socket
 from pathlib import Path
 for path in ['/etc/ai-bootstrap/memory.key', '/etc/ai-bootstrap/model-keys/openrouter.key',
-             '/var/lib/ai-memory', '/run/credentials/ai-bootstrap-memory@PROJECT.service/provider.key']:
+             '/var/lib/ai-memory/PROJECT/memory.rdb', '/run/credentials/ai-bootstrap-memory@PROJECT.service/provider.key']:
     try:
         Path(path).read_bytes()
-    except (PermissionError, FileNotFoundError, IsADirectoryError):
+    except (PermissionError, FileNotFoundError):
         pass
     else:
         raise AssertionError('Host memory credential is exposed')
