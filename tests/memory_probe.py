@@ -26,9 +26,9 @@ class MemoryClient:
         assert response.get('id') == self.sequence and 'error' not in response, 'MCP protocol failure'
         return response['result']
 
-    def call(self, name, **arguments):
-        result = self.request('tools/call', {'name': name, 'arguments': arguments})
-        assert not result.get('isError'), f'Memory tool failed: {name}'
+    def call(self, tool_name, **arguments):
+        result = self.request('tools/call', {'name': tool_name, 'arguments': arguments})
+        assert not result.get('isError'), f'Memory tool failed: {tool_name}'
         return json.loads(result['content'][0]['text'])
 
     def close(self):
