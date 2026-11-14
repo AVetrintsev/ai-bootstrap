@@ -31,7 +31,7 @@ def request(action, *, socket_path=AGENT_SOCKET, **fields):
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(20)
         connection.connect(socket_path)
-        connection.sendall(json.dumps({'action': action, **fields}).encode() + b'\n')
+        connection.sendall(json.dumps({'action': action, **fields}, ensure_ascii=False).encode() + b'\n')
         with connection.makefile('rb') as reply:
             result = json.loads(reply.readline(1024 * 1024))
     if 'error' in result:

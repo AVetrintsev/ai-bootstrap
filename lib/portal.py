@@ -29,7 +29,7 @@ from qrcode.image.svg import SvgPathFillImage
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shared_memory_client import OWNER_SOCKET, request as shared_memory_request
 
-MEMORY_STYLE = '.memory{max-width:72ch;margin:1.5rem auto;padding:0 1rem}.memory pre{white-space:pre-wrap;overflow-wrap:anywhere}.memory article{margin:2rem 0}.memory button{padding:.6rem 1rem}.memory input:focus-visible,.memory button:focus-visible,.memory a:focus-visible{outline:2px solid;outline-offset:3px}'
+MEMORY_STYLE = '.memory{max-width:72ch;margin:1.5rem auto;padding:0 1rem;line-height:1.5}.memory pre,.memory h2{white-space:pre-wrap;overflow-wrap:anywhere}.memory pre,.memory code{font:inherit}.memory article{margin:2rem 0}.memory button{padding:.6rem 1rem}.memory input:focus-visible,.memory button:focus-visible,.memory a:focus-visible{outline:2px solid;outline-offset:3px}'
 MEMORY_STYLE_HASH = base64.b64encode(hashlib.sha256(MEMORY_STYLE.encode()).digest()).decode()
 
 STATE = Path("/var/lib/ai-portal")
@@ -222,11 +222,16 @@ class OwnerAccess:
             (token_hash, now),
         ).fetchone() is not None
 
-    def has_session(self, token):
+    def has_session(self, token, *, renew=False):
         if not TOKEN.fullmatch(token):
             return False
-        with closing(self.connect()) as db:
-            return self.active_session(db, digest(token), int(self.clock()))
+        with closing(self.connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE" if renew else "BEGIN")
+            token_hash, now = digest(token), int(self.clock())
+            active = self.active_session(db, token_hash, now)
+            if active and renew:
+                self.renew_session(db, token_hash, now)
+            return active
 
     @staticmethod
     def renew_session(db, token_hash, now):
@@ -347,10 +352,10 @@ def respond(start_response, status, body="", content_type="text/plain; charset=u
     return [body.encode("utf-8")]
 
 
-def html_page(title, content):
+def html_page(title, content, *, page_class=""):
     return f"""<!doctype html>
 <html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>{title}</title><h1>{title}</h1>{content}</html>
+<title>{title}</title><body class="{page_class}"><h1>{title}</h1>{content}</body></html>
 """
 
 
@@ -530,8 +535,12 @@ class Portal:
             return respond(start_response, HTTPStatus.SERVICE_UNAVAILABLE,
                 html_page('Общая память', '<p>Не удалось выполнить действие. Проверьте доступность памяти и повторите попытку.</p>' + back),
                 'text/html; charset=utf-8')
-        page = html_page(title, f'<style>{MEMORY_STYLE}</style><main class="memory">{content}</main>')
-        return respond(start_response, HTTPStatus.OK, page, 'text/html; charset=utf-8')
+        page = html_page(title, f'<style>{MEMORY_STYLE}</style><main>{content}</main>', page_class='memory')
+        renew = method == 'POST' or foreground_navigation(environ)
+        if not self.owner.has_session(session, renew=renew):
+            return respond(start_response, HTTPStatus.NOT_FOUND)
+        headers = (self.cookie(session),) if renew else ()
+        return respond(start_response, HTTPStatus.OK, page, 'text/html; charset=utf-8', headers)
 
     def codex(self, environ, start_response, session, path, method):
         action = {("GET", "/codex"): "status", ("POST", "/codex/login"): "login",
