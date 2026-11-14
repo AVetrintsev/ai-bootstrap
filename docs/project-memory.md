@@ -54,7 +54,7 @@ HTTP-провайдером моделей. Нужны зависимости `/
 ```sh
 python3 -m venv --system-site-packages /tmp/memory-tests
 /tmp/memory-tests/bin/pip install 'graphiti-core[falkordblite]==0.31.2' \
-  falkordblite==0.11.0 jsonschema==4.26.0 mcp==1.26.0
+  falkordblite==0.11.0 jsonschema==4.26.0 httpx==0.28.1 mcp==1.26.0
 GRAPHITI_TELEMETRY_ENABLED=false /tmp/memory-tests/bin/python -m unittest discover -s tests -v
 ```
 

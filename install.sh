@@ -333,15 +333,19 @@ configure_memory() {
     service_account ai-memory /var/lib/ai-memory
     install -d -m 0700 -o ai-memory -g ai-memory /var/lib/ai-memory
     if [[ ! -x /opt/ai-memory/bin/python ]]; then
-        python3 -m venv /opt/ai-memory
+        (umask 022; python3 -m venv /opt/ai-memory)
     fi
     installed=$(cat /opt/ai-memory/ai-bootstrap-version 2>/dev/null || true)
-    if [[ $installed != "$GRAPHITI_VERSION:$FALKORDBLITE_VERSION:$MEMORY_JSONSCHEMA_VERSION" ]]; then
-        quiet 'could not install pinned Graphiti and FalkorDB' /opt/ai-memory/bin/pip install \
+    if [[ $installed != "$GRAPHITI_VERSION:$FALKORDBLITE_VERSION:$MEMORY_JSONSCHEMA_VERSION:$MEMORY_HTTPX_VERSION" ]]; then
+        (umask 022; quiet 'could not install pinned Graphiti and FalkorDB' /opt/ai-memory/bin/pip install \
             --disable-pip-version-check --no-cache-dir "graphiti-core[falkordblite]==$GRAPHITI_VERSION" \
-            "falkordblite==$FALKORDBLITE_VERSION" "jsonschema==$MEMORY_JSONSCHEMA_VERSION"
-        printf '%s' "$GRAPHITI_VERSION:$FALKORDBLITE_VERSION:$MEMORY_JSONSCHEMA_VERSION" > /opt/ai-memory/ai-bootstrap-version
+            "falkordblite==$FALKORDBLITE_VERSION" "jsonschema==$MEMORY_JSONSCHEMA_VERSION" "httpx==$MEMORY_HTTPX_VERSION")
+        printf '%s' "$GRAPHITI_VERSION:$FALKORDBLITE_VERSION:$MEMORY_JSONSCHEMA_VERSION:$MEMORY_HTTPX_VERSION" > /opt/ai-memory/ai-bootstrap-version
     fi
+    # Repair releases installed under the installer's private umask. No secrets live here.
+    chmod -R a+rX /opt/ai-memory
+    (cd /; quiet 'Graphiti runtime is not usable by ai-memory' runuser -u ai-memory -- \
+        /opt/ai-memory/bin/python -I -c 'from graphiti_core import Graphiti; from redislite.falkordb_client import FalkorDB')
     key_source=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["key_file"])' "$work/project-memory.json")
     [[ -f $key_source && ! -L $key_source ]] || fail 'project memory provider key is missing or not a regular file'
     publish "$key_source" "$etc/memory.key" 600
