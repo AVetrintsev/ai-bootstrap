@@ -40,7 +40,7 @@ with sqlite3.connect(database) as db:
                (token_hash, now + 1800, "Canvas acceptance", now, now))
 try:
     if tool in ('memory', 'shared-memory'):
-        from memory_probe import MemoryClient
+        from memory_probe import MemoryClient, has_memory_record
         memory = MemoryClient(project)
         if tool == 'shared-memory':
             seed = memory.call('get_shared_memory', uuid=sys.argv[5])
@@ -128,10 +128,11 @@ try:
                         if (value.get('tool_call_id') and value.get('source') == 'agent' and
                                 value.get('status') == 'completed' and not value.get('is_error')):
                             output = value.get('raw_output') or value.get('content')
-                            if has_symbol(output):
-                                for name in expected:
-                                    if name in value.get('title', ''):
-                                        completed.add(name)
+                            for name in expected:
+                                if name in value.get('title', '') and (
+                                        has_memory_record(output, seed) if name == 'get_shared_memory'
+                                        else has_symbol(output)):
+                                    completed.add(name)
                         for child in value.values():
                             inspect(child)
                     elif isinstance(value, list):

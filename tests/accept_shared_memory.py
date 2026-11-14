@@ -40,16 +40,31 @@ def agent_call(project_name, agent, name, identity):
         'shared-memory', name, identity, timeout=420)
 
 
-def fixture_rows(page, name):
+def proposal_pages(page):
     page.goto('http://localhost:8080/memory')
     while True:
-        rows = page.locator('article').filter(has=page.get_by_role('heading', name=name, exact=True))
-        if rows.count():
-            return rows
+        yield page.locator('article')
         following = page.get_by_role('link', name='Следующие предложения')
         if not following.count():
-            raise AssertionError('Agent proposal was not found in the owner portal')
+            return
         following.click()
+
+
+def fixture_rows(page, name):
+    for rows in proposal_pages(page):
+        matches = rows.filter(has=page.get_by_role('heading', name=name, exact=True))
+        if matches.count():
+            return matches
+    raise AssertionError('Agent proposal was not found in the owner portal')
+
+
+def pending_fixture_ids(page, name):
+    identities = []
+    for rows in proposal_pages(page):
+        matches = rows.filter(has=page.get_by_role('heading', name=name, exact=True))
+        identities.extend(matches.nth(index).locator('input[name="uuid"]').input_value()
+                          for index in range(matches.count()))
+    return identities
 
 
 def check_published(identities):
@@ -120,23 +135,21 @@ try:
                 run(sys.executable, str(tests / 'accept_canvas.py'), project, chromium,
                     agent, 'shared-memory', identities[0], stdout=output, stderr=subprocess.STDOUT, timeout=900)
             print(f'OK {agent} Canvas completed shared read and proposal; {log}', flush=True)
-        pending_rows = fixture_rows(page, names[0])
-        pending = [pending_rows.nth(index).locator('input[name="uuid"]').input_value()
-                   for index in range(pending_rows.count())]
+        pending = pending_fixture_ids(page, names[0])
         assert len(pending) >= 2, 'Canvas proposals are absent from the portal'
         with MemoryClient(other) as memory:
             for identity in pending:
                 assert memory.request('tools/call', {'name': 'get_shared_memory', 'arguments': {'uuid': identity}}).get('isError')
         run('systemctl', 'restart', 'ai-bootstrap-shared-memory.service')
         check_published(identities)
-        assert fixture_rows(page, names[0]).count() >= 2
+        assert set(pending_fixture_ids(page, names[0])) == set(pending)
         if len(sys.argv) == 5:
             log = Path('/tmp') / (names[0] + '-reinstall.log')
             with log.open('w') as output:
                 run('bash', str(Path(sys.argv[4]).resolve()), '--config', '/etc/ai-bootstrap/config.yaml',
                     stdout=output, stderr=subprocess.STDOUT, timeout=1200)
             check_published(identities)
-            assert fixture_rows(page, names[0]).count() >= 2
+            assert set(pending_fixture_ids(page, names[0])) == set(pending)
             print(f'OK published records and pending proposals survived reinstall; {log}', flush=True)
         with MemoryClient(project) as memory:
             assert memory.call('get_episode', uuid=private)['content'] == 'Private acceptance color is purple.'
@@ -157,15 +170,20 @@ for path in ('/run/ai-bootstrap-shared-memory.sock', '/run/ai-bootstrap-shared-m
         print('OK shared storage and approval sockets are outside both sandboxes', flush=True)
         browser.close()
 finally:
-    if private:
-        with MemoryClient(project) as memory:
-            memory.call('delete_episode', uuid=private)
-    with sqlite3.connect(database) as db:
-        db.execute('DELETE FROM sessions WHERE token_hash = ?', (token_hash,))
+    cleanup_errors = []
+    try:
+        if private:
+            with MemoryClient(project) as memory:
+                memory.call('delete_episode', uuid=private)
+    except Exception as error:
+        cleanup_errors.append(error)
+    try:
+        with sqlite3.connect(database) as db:
+            db.execute('DELETE FROM sessions WHERE token_hash = ?', (token_hash,))
+    except Exception as error:
+        cleanup_errors.append(error)
     # Fixture cleanup only: stop the shared writer before opening its database.
     # Match unpredictable names created by this run; never remove other records.
-    run('systemctl', 'stop', 'ai-bootstrap-shared-memory.socket',
-        'ai-bootstrap-shared-memory-owner.socket', 'ai-bootstrap-shared-memory.service')
     cleanup = '''import asyncio, json, sys
 sys.path.insert(0, '/usr/local/libexec/ai-bootstrap')
 from shared_memory import SharedMemory, EpisodicNode
@@ -189,6 +207,15 @@ async def main():
 asyncio.run(main())
 '''
     try:
+        run('systemctl', 'stop', 'ai-bootstrap-shared-memory.socket',
+            'ai-bootstrap-shared-memory-owner.socket', 'ai-bootstrap-shared-memory.service')
         run('runuser', '-u', 'ai-memory', '--', '/opt/ai-memory/bin/python', '-I', '-c', cleanup, json.dumps(names), cwd='/')
+    except Exception as error:
+        cleanup_errors.append(error)
     finally:
-        run('systemctl', 'start', 'ai-bootstrap-shared-memory.socket', 'ai-bootstrap-shared-memory-owner.socket')
+        try:
+            run('systemctl', 'start', 'ai-bootstrap-shared-memory.socket', 'ai-bootstrap-shared-memory-owner.socket')
+        except Exception as error:
+            cleanup_errors.append(error)
+    if cleanup_errors:
+        raise ExceptionGroup('Acceptance fixture cleanup failed', cleanup_errors)

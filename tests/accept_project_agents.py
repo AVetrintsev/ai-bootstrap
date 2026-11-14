@@ -100,6 +100,7 @@ def has_symbol(value):
 
 
 if shared_mode:
+    from memory_probe import has_memory_record
     identity = sys.argv[5]
     tool = 'propose_shared_memory' if identity == 'propose' else 'get_shared_memory'
     prompt = (f'Call Graphiti propose_shared_memory with name="{symbol}" and '
@@ -111,8 +112,10 @@ if shared_mode:
     log = Path('/tmp') / (symbol + '-' + project + '-' + agent + '-' + tool + '.log')
     with log.open('w') as output:
         calls = prompt_agent(prompt, output)
+    expected = {'uuid': identity, 'name': symbol, 'content': f'Shared memory acceptance: {symbol}.'}
     assert any(tool in call.get('title', '') and call.get('status') == 'completed'
-               and has_symbol(call.get('content')) for call in calls), f'No completed {tool}; see {log}'
+               and (has_symbol(call.get('content')) if identity == 'propose' else
+                    has_memory_record(call.get('content'), expected)) for call in calls), f'No completed {tool}; see {log}'
     print(f'OK {agent} in {project} completed {tool} via MCP')
     sys.exit(0)
 

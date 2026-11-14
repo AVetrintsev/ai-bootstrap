@@ -4,6 +4,22 @@ import select
 import subprocess
 
 
+def has_memory_record(value, expected):
+    """Find an exact record in completed ACP/Canvas tool output, including JSON text."""
+    if isinstance(value, str):
+        try:
+            return has_memory_record(json.loads(value), expected)
+        except ValueError:
+            return (any(has_memory_record(line, expected) for line in value.splitlines())
+                    if len(value.splitlines()) > 1 else False)
+    if isinstance(value, dict):
+        if value.get('isError') or value.get('is_error'):
+            return False
+        return (all(value.get(key) == expected[key] for key in ('uuid', 'name', 'content'))
+                or any(has_memory_record(child, expected) for child in value.values()))
+    return isinstance(value, list) and any(has_memory_record(child, expected) for child in value)
+
+
 class MemoryClient:
     def __init__(self, project):
         self.process = subprocess.Popen(['ai-sandbox', 'shell', project, 'python3', '-I',
