@@ -28,9 +28,12 @@ from qrcode.image.svg import SvgPathFillImage
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shared_memory_client import OWNER_SOCKET, request as shared_memory_request
+from shared_rules import RULES_PATH, RULE_LIMIT, Rules, RuleConflict
 
 MEMORY_STYLE = '.memory{max-width:72ch;margin:1.5rem auto;padding:0 1rem;line-height:1.5}.memory pre,.memory h2{white-space:pre-wrap;overflow-wrap:anywhere}.memory pre,.memory code{font:inherit}.memory article{margin:2rem 0}.memory button{padding:.6rem 1rem}.memory input:focus-visible,.memory button:focus-visible,.memory a:focus-visible{outline:2px solid;outline-offset:3px}'
 MEMORY_STYLE_HASH = base64.b64encode(hashlib.sha256(MEMORY_STYLE.encode()).digest()).decode()
+RULES_STYLE = '.rules{max-width:72ch;margin:1.5rem auto;padding:0 1rem;line-height:1.5}.rules textarea{box-sizing:border-box;display:block;width:100%;font:inherit;padding:.6rem;resize:vertical}.rules article,.rules section{margin:2rem 0}.rules button{font:inherit;padding:.6rem 1rem;margin:.5rem 0}.rules h1,.rules p{overflow-wrap:anywhere}.rules :focus-visible{outline:2px solid;outline-offset:3px}.rules details{margin-top:.5rem}.rules summary{cursor:pointer}.rules .error{font-weight:bold}'
+RULES_STYLE_HASH = base64.b64encode(hashlib.sha256(RULES_STYLE.encode()).digest()).decode()
 
 STATE = Path("/var/lib/ai-portal")
 KEY = Path("/etc/ai-bootstrap/portal.key")
@@ -344,7 +347,7 @@ def respond(start_response, status, body="", content_type="text/plain; charset=u
             ("Referrer-Policy", "no-referrer"),
             ("Content-Security-Policy", "default-src 'none'; img-src data:; form-action 'self'; "
                                         "frame-ancestors 'none'; base-uri 'none'; "
-                                        f"style-src 'sha256-{MEMORY_STYLE_HASH}'"),
+                                        f"style-src 'sha256-{MEMORY_STYLE_HASH}' 'sha256-{RULES_STYLE_HASH}'"),
             ("X-Content-Type-Options", "nosniff"),
             *headers,
         ],
@@ -397,11 +400,12 @@ def browser_row(browser, current_hash, csrf):
 
 class Portal:
     def __init__(self, state, key, *, clock=time.time, secure=False, codex_socket="/run/ai-bootstrap-codex.sock",
-                 shared_memory_socket=OWNER_SOCKET):
+                 shared_memory_socket=OWNER_SOCKET, rules_path=RULES_PATH):
         self.owner = OwnerAccess(state, key, clock)
         self.secure = secure
         self.codex_socket = codex_socket
         self.shared_memory_socket = shared_memory_socket
+        self.rules = Rules(rules_path)
 
     def __call__(self, environ, start_response):
         path = environ["PATH_INFO"]
@@ -428,6 +432,8 @@ class Portal:
                 return self.codex(environ, start_response, session, path, method)
             if path in ("/memory", "/memory/approve") and self.owner.has_session(session):
                 return self.shared_memory(environ, start_response, session, path, method)
+            if path in ('/rules', '/rules/add', '/rules/save', '/rules/delete') and self.owner.has_session(session):
+                return self.shared_rules(environ, start_response, session, path, method)
             if method == "GET" and self.owner.has_session(session):
                 if path == "/api/status":
                     return respond(start_response, HTTPStatus.OK, '{"status":"ok"}\n', "application/json")
@@ -476,12 +482,84 @@ class Portal:
 <p><a href="/projects">Проекты</a></p>
 <p><a href="/codex">Подключение Codex</a></p>
 <p><a href="/memory">Общая память</a></p>
+<p><a href="/rules">Общие правила</a></p>
 <p><a href="{link}">Зарегистрировать браузер</a></p>
 <h2>Зарегистрированные браузеры</h2>
 <table><thead><tr><th>Имя</th><th>Регистрация</th><th>Последняя активность</th>
 <th>Срок действия</th><th>Управление</th></tr></thead><tbody>{rows}</tbody></table>""")
         headers = (self.cookie(session),) if renew else ()
         return respond(start_response, HTTPStatus.OK, page, "text/html; charset=utf-8", headers)
+
+    def shared_rules(self, environ, start_response, session, path, method):
+        action = {('POST', '/rules/add'): 'add', ('POST', '/rules/save'): 'save',
+                  ('POST', '/rules/delete'): 'delete'}.get((method, path))
+        if action is None and (method, path) != ('GET', '/rules'):
+            return respond(start_response, HTTPStatus.NOT_FOUND)
+        csrf = csrf_token(session)
+        form = {}
+        error = ''
+        status = HTTPStatus.OK
+        try:
+            if action:
+                form = submitted_form(environ, max_fields=5, max_length=50000)
+                if not hmac.compare_digest(form.get('csrf', ''), csrf):
+                    return respond(start_response, HTTPStatus.FORBIDDEN, 'Недействительная форма. Обновите страницу.\n')
+                fields = {'csrf', 'content'} if action == 'add' else {'csrf', 'id', 'revision', 'content'}
+                if action == 'delete':
+                    fields = {'csrf', 'id', 'revision', 'confirm'}
+                if set(form) != fields or (action == 'delete' and form['confirm'] != 'yes'):
+                    raise ValueError('Заполните форму и подтвердите действие.')
+                self.rules.change(action, content=form.get('content', ''), identity=form.get('id', ''),
+                                  revision=form.get('revision', ''))
+                if not self.owner.has_session(session, renew=True):
+                    return respond(start_response, HTTPStatus.NOT_FOUND)
+                return respond(start_response, HTTPStatus.SEE_OTHER, headers=(
+                    ('Location', '/rules?saved=' + action), self.cookie(session)))
+        except RuleConflict as failure:
+            status, error = HTTPStatus.CONFLICT, str(failure)
+        except ValueError as failure:
+            status, error = HTTPStatus.BAD_REQUEST, str(failure)
+        except (OSError, sqlite3.Error):
+            status, error = HTTPStatus.SERVICE_UNAVAILABLE, 'Не удалось сохранить правила. Повторите попытку позже.'
+        try:
+            rules = self.rules.list()
+        except (OSError, sqlite3.Error):
+            return respond(start_response, HTTPStatus.SERVICE_UNAVAILABLE,
+                           html_page('Общие правила', '<p>Правила временно недоступны. Повторите попытку позже.</p><a href="/">Главная</a>'),
+                           'text/html; charset=utf-8')
+        content = ('<p><a href="/">Главная</a></p><p>Эти правила получают Codex и Qwen во всех проектах. '
+                   'Изменения действуют в новых сеансах Canvas и терминала.</p>')
+        notices = {'saved=add': 'Правило добавлено.', 'saved=save': 'Изменения сохранены.', 'saved=delete': 'Правило удалено.'}
+        notice = notices.get(environ.get('QUERY_STRING', '')) if method == 'GET' else None
+        if notice:
+            content += f'<p role="status">{notice}</p>'
+        if error:
+            content += f'<p class="error" role="alert">{escape(error)}</p>'
+            if form.get('content'):
+                content += f'<label>Ваш несохранённый текст<textarea readonly rows="5">{escape(form["content"])}</textarea></label>'
+        hidden = f'<input type="hidden" name="csrf" value="{csrf}">'
+        content += (f'<section aria-labelledby="add-rule"><h2 id="add-rule">Добавить правило</h2>'
+                    f'<form method="post" action="/rules/add">{hidden}<label for="new-rule">Текст нового правила</label>'
+                    f'<textarea id="new-rule" name="content" rows="4" maxlength="{RULE_LIMIT}" required aria-describedby="rule-limit"></textarea>'
+                    '<p id="rule-limit">До 4000 символов в правиле, до 16000 символов во всём списке.</p>'
+                    '<button>Добавить правило</button></form></section><h2>Действующие правила</h2>')
+        if not rules:
+            content += '<p>Общих правил пока нет. Добавьте первое правило выше.</p>'
+        for number, item in enumerate(rules, 1):
+            identity = escape(item['id'])
+            fields = (hidden + f'<input type="hidden" name="id" value="{identity}">'
+                      f'<input type="hidden" name="revision" value="{escape(item["revision"])}">')
+            content += f'''<article aria-label="Правило {number}"><form method="post" action="/rules/save">{fields}
+<label for="rule-{identity}">Правило {number}</label>
+<textarea id="rule-{identity}" name="content" rows="5" maxlength="{RULE_LIMIT}" required>{escape(item['content'])}</textarea>
+<button>Сохранить изменения</button></form>
+<details><summary>Удаление правила {number}</summary><p>Правило перестанет передаваться в новые сеансы всех проектов.</p>
+<form method="post" action="/rules/delete">{fields}<button name="confirm" value="yes">Удалить правило</button></form></details></article>'''
+        renew = method == 'POST' or foreground_navigation(environ)
+        if not self.owner.has_session(session, renew=renew):
+            return respond(start_response, HTTPStatus.NOT_FOUND)
+        page = html_page('Общие правила', f'<style>{RULES_STYLE}</style><main>{content}</main>', page_class='rules')
+        return respond(start_response, status, page, 'text/html; charset=utf-8', (self.cookie(session),) if renew else ())
 
     def shared_memory(self, environ, start_response, session, path, method):
         if (method, path) not in (("GET", "/memory"), ("POST", "/memory/approve")):

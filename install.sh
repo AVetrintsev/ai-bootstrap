@@ -288,6 +288,8 @@ configure_model_gateway() {
     publish "$release/lib/model-key.py" /usr/local/sbin/ai-model-key 755
     publish "$release/lib/qwen-setup.sh" "$libexec/qwen-setup.sh" 644
     publish "$release/lib/qwen-launcher" "$libexec/qwen-launcher" 755
+    install -d -m 0755 "$libexec/github-sandbox"
+    publish "$release/lib/rules_client.py" "$libexec/github-sandbox/rules_client.py" 644
     publish "$release/lib/ai-bootstrap-models.service" /etc/systemd/system/ai-bootstrap-models.service 644
     quiet 'could not load model gateway unit' systemctl daemon-reload
     if [[ $(cat "$work/model-gateway.json") == null ]]; then
@@ -478,6 +480,9 @@ configure_github_projects() {
 configure_portal() {
     service_account ai-portal "$portal_state"
     install -d -o ai-portal -g ai-portal -m 0700 "$portal_state"
+    install -d -o ai-portal -g ai-portal -m 0755 /var/lib/ai-rules
+    publish "$release/lib/shared_rules.py" "$libexec/shared_rules.py" 644
+    quiet 'could not initialize shared rules' runuser -u ai-portal -- python3 -I "$libexec/shared_rules.py"
     configure_shared_memory
     configure_canvas
     configure_codex

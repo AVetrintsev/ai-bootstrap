@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import sys
 
+sys.path.insert(0, '/usr/local/lib/ai-bootstrap')
+from rules_client import read_rules
+
 try:
     settings = json.loads(Path("/root/.config/ai-bootstrap/model-gateway.json").read_text())
 except (OSError, ValueError):
@@ -16,6 +19,12 @@ environment.update(OPENAI_API_KEY=settings["api_key"], OPENAI_BASE_URL=base_url,
 environment.setdefault("NODE_OPTIONS", "--max-old-space-size=512")
 arguments = sys.argv[1:]
 defaults = []
+try:
+    rules = read_rules()
+except (OSError, ValueError):
+    sys.exit('Общие правила недоступны. Повторите запуск после восстановления службы проекта.')
+if rules:
+    defaults += ['--append-system-prompt', rules]
 if not any(arg == "--auth-type" or arg.startswith("--auth-type=") for arg in arguments):
     defaults += ["--auth-type", "openai"]
 if not any(arg in ("--model", "-m") or arg.startswith(("--model=", "-m=")) for arg in arguments):
