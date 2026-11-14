@@ -10,15 +10,21 @@ import sys
 import threading
 import time
 
-if os.geteuid() != 0 or len(sys.argv) not in (3, 4) or not re.fullmatch(r'gh-[1-9][0-9]{0,18}', sys.argv[1]):
-    sys.exit('Usage: sudo python3 tests/accept_project_agents.py PROJECT qwen|codex [memory]')
+if os.geteuid() != 0 or len(sys.argv) not in (3, 4, 6) or not re.fullmatch(r'gh-[1-9][0-9]{0,18}', sys.argv[1]):
+    sys.exit('Usage: sudo python3 tests/accept_project_agents.py PROJECT qwen|codex [memory | shared-memory NAME propose|UUID]')
 project, agent = sys.argv[1:3]
 memory_mode = len(sys.argv) == 4 and sys.argv[3] == 'memory'
-if len(sys.argv) == 4 and not memory_mode:
-    sys.exit('Expected memory')
+shared_mode = len(sys.argv) == 6 and sys.argv[3] == 'shared-memory'
+if len(sys.argv) > 3 and not (memory_mode or shared_mode):
+    sys.exit('Expected memory or shared-memory NAME propose|UUID')
 if agent not in ('qwen', 'codex'):
     sys.exit('Expected qwen or codex')
 symbol = 'terminal_tools_' + secrets.token_hex(8)
+if shared_mode:
+    symbol = sys.argv[4]
+    if (not re.fullmatch(r'shared-[0-9a-f]{16}', symbol)
+            or not re.fullmatch(r'propose|[0-9a-f-]{36}', sys.argv[5])):
+        sys.exit('Invalid shared-memory acceptance name or UUID')
 fixture = '/workspace/repo/' + symbol + '.ts'
 marker = fixture + '.result'
 
@@ -91,6 +97,24 @@ def has_symbol(value):
     if isinstance(value, dict):
         return not value.get('isError') and any(has_symbol(v) for k, v in value.items() if k not in ('query', 'search_term'))
     return isinstance(value, list) and any(has_symbol(v) for v in value)
+
+
+if shared_mode:
+    identity = sys.argv[5]
+    tool = 'propose_shared_memory' if identity == 'propose' else 'get_shared_memory'
+    prompt = (f'Call Graphiti propose_shared_memory with name="{symbol}" and '
+              f'episode_body="Shared memory acceptance: {symbol}.". '
+              'This is only a proposal; the owner will publish it later. Use only this MCP tool.'
+              if identity == 'propose' else
+              f'Call Graphiti get_shared_memory with uuid="{identity}". Report its name and exact content. '
+              'Use only this MCP tool.')
+    log = Path('/tmp') / (symbol + '-' + project + '-' + agent + '-' + tool + '.log')
+    with log.open('w') as output:
+        calls = prompt_agent(prompt, output)
+    assert any(tool in call.get('title', '') and call.get('status') == 'completed'
+               and has_symbol(call.get('content')) for call in calls), f'No completed {tool}; see {log}'
+    print(f'OK {agent} in {project} completed {tool} via MCP')
+    sys.exit(0)
 
 
 if memory_mode:

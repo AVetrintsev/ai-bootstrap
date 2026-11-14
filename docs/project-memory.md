@@ -105,6 +105,7 @@ sudo python3 tests/accept_project_agents.py gh-FIRST codex memory
 sudo python3 tests/accept_project_agents.py gh-FIRST qwen memory
 sudo BROWSER_PYTHON tests/accept_canvas.py gh-FIRST CHROMIUM codex memory
 sudo BROWSER_PYTHON tests/accept_canvas.py gh-FIRST CHROMIUM qwen memory
+sudo BROWSER_PYTHON tests/accept_shared_memory.py gh-FIRST gh-SECOND CHROMIUM ./install.sh
 ```
 
 Первый сценарий проверяет обмен памятью, поиск фактов, подмену проекта и UUID,
@@ -112,6 +113,15 @@ sudo BROWSER_PYTHON tests/accept_canvas.py gh-FIRST CHROMIUM qwen memory
 к FalkorDB. Терминальные сценарии проверяют завершённые вызовы одного агента
 на запись и другого на чтение. Canvas проверяет завершённые MCP-вызовы в событиях
 браузера и записанную память независимым клиентом. Временные записи удаляются.
+
+Сценарий `accept_shared_memory.py` проверяет предложения настоящих Codex и Qwen,
+точный текст в браузере, отказ публикации от агента и без подтверждения владельца,
+чтение обоими агентами в двух проектах, Canvas, изоляцию частных записей и
+сохранение общей памяти и предложений после перезапуска и повторной установки.
+Он удаляет только собственные временные записи и сессию. Для очистки на короткое
+время останавливает общую память; запускайте приёмку вне активной работы с ней.
+Автоматические тесты `test_shared_memory.py` покрывают эти границы без реальных
+агентов, а также максимальный Unicode-текст, страницы и продление сессий.
 
 Основание: [Graphiti MCP](https://help.getzep.com/graphiti/getting-started/mcp-server),
 [FalkorDB Lite](https://github.com/FalkorDB/falkordblite),
