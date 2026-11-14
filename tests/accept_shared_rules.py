@@ -88,9 +88,9 @@ def canvas(context, project, agent, expected):
             page.wait_for_timeout(1000)
         else:
             raise AssertionError(f'{project} {agent} Canvas did not finish')
-        events = context.request.get(base + '/events/search?source=agent&kind=MessageEvent&limit=100').json()['items']
-        answers = [''.join(part.get('text', '') for part in event['llm_message']['content']).strip()
-                   for event in events if event['llm_message']['role'] == 'assistant']
+        # Agent Server persists ACP's completed text as the finish action.
+        events = context.request.get(base + '/events/search?source=agent&kind=ActionEvent&limit=100').json()['items']
+        answers = [event['action']['message'].strip() for event in events if event.get('tool_name') == 'finish']
         assert answers == [expected], f'Unexpected completed Canvas messages: {answers!r}'
         page.get_by_text(expected, exact=True).first.wait_for(timeout=10000)
         print(f'OK {project} {agent} Canvas {expected}', flush=True)
