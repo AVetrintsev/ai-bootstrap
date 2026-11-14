@@ -10,9 +10,12 @@ import sys
 import threading
 import time
 
-if os.geteuid() != 0 or len(sys.argv) != 3 or not re.fullmatch(r'gh-[1-9][0-9]{0,18}', sys.argv[1]):
-    sys.exit('Usage: sudo python3 tests/accept_project_agents.py PROJECT qwen|codex')
-project, agent = sys.argv[1:]
+if os.geteuid() != 0 or len(sys.argv) not in (3, 4) or not re.fullmatch(r'gh-[1-9][0-9]{0,18}', sys.argv[1]):
+    sys.exit('Usage: sudo python3 tests/accept_project_agents.py PROJECT qwen|codex [memory]')
+project, agent = sys.argv[1:3]
+memory_mode = len(sys.argv) == 4 and sys.argv[3] == 'memory'
+if len(sys.argv) == 4 and not memory_mode:
+    sys.exit('Expected memory')
 if agent not in ('qwen', 'codex'):
     sys.exit('Expected qwen or codex')
 symbol = 'terminal_tools_' + secrets.token_hex(8)
@@ -88,6 +91,34 @@ def has_symbol(value):
     if isinstance(value, dict):
         return not value.get('isError') and any(has_symbol(v) for k, v in value.items() if k not in ('query', 'search_term'))
     return isinstance(value, list) and any(has_symbol(v) for v in value)
+
+
+if memory_mode:
+    from memory_probe import MemoryClient
+    with MemoryClient(project) as memory:
+        try:
+            log = Path('/tmp') / (symbol + '-memory-writer.log')
+            with log.open('w') as output:
+                calls = prompt_agent(f'Call Graphiti add_memory with name="{symbol}" and '
+                    f'episode_body="The project acceptance color is purple. Reference: {symbol}.". '
+                    'Use only this MCP tool, then reply DONE.', output)
+            assert any('add_memory' in call.get('title', '') and call.get('status') == 'completed'
+                       and has_symbol(call.get('content')) for call in calls), f'No completed memory write; see {log}'
+            episode = next(item for item in memory.call('get_episodes')['episodes'] if item['name'] == symbol)
+            writer_agent = agent
+            agent = 'qwen' if agent == 'codex' else 'codex'
+            log = Path('/tmp') / (symbol + '-memory-reader.log')
+            with log.open('w') as output:
+                calls = prompt_agent(f'Call Graphiti get_episode with uuid="{episode["uuid"]}". '
+                    'Report the memory name and content. Use only this MCP tool.', output)
+            assert any('get_episode' in call.get('title', '') and call.get('status') == 'completed'
+                       and has_symbol(call.get('content')) for call in calls), f'No completed shared memory read; see {log}'
+            print(f'OK {writer_agent} terminal wrote memory and {agent} terminal read it via MCP')
+        finally:
+            for episode in memory.call('get_episodes', num_results=20)['episodes']:
+                if episode['name'] == symbol:
+                    memory.call('delete_episode', uuid=episode['uuid'])
+    sys.exit(0)
 
 
 try:

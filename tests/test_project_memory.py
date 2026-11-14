@@ -186,6 +186,21 @@ class MemoryTest(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def test_official_mcp_client_can_discover_and_call_memory_tools(self):
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        async with stdio_client(StdioServerParameters(command='/usr/bin/socat',
+                args=['STDIO', 'UNIX-CONNECT:' + str(self.socket_path)])) as (reader, writer):
+            async with ClientSession(reader, writer) as client:
+                await client.initialize()
+                listing = await client.list_tools()
+                self.assertIn('add_memory', [tool.name for tool in listing.tools])
+                added = await client.call_tool('add_memory', {'name': 'SDK', 'episode_body': 'Shared via standard MCP.'})
+                self.assertFalse(added.isError)
+                records = await client.call_tool('get_episodes', {})
+                self.assertFalse(records.isError)
+                self.assertIn('Shared via standard MCP.', str(records.content))
+
 
 if __name__ == '__main__':
     unittest.main()
