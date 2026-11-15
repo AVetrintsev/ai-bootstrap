@@ -14,7 +14,11 @@ import secrets
 import sqlite3
 import ssl
 import sys
+from typing import cast
 from urllib.parse import urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shared_rules import RULES_PATH, Rules
 
 
 CONFIG = Path("/etc/ai-bootstrap/model-gateway.json")
@@ -109,7 +113,16 @@ def provision(config, state, project):
             "models": policy["models"], "max_output_tokens": policy["max_output_tokens"]}
 
 
+class GatewayServer(ThreadingHTTPServer):
+    config: Path
+    state: Path
+    rules_path: Path
+
+
 class Handler(BaseHTTPRequestHandler):
+    @property
+    def gateway(self):
+        return cast(GatewayServer, self.server)
     protocol_version = "HTTP/1.0"
     server_version = "AIModelGateway"
     sys_version = ""
@@ -118,7 +131,7 @@ class Handler(BaseHTTPRequestHandler):
         self.request.settimeout(30)
         super().setup()
 
-    def log_message(self, *_):
+    def log_message(self, format, *args):
         # Requests may contain workspace text or credentials. Do not log them.
         pass
 
@@ -139,18 +152,24 @@ class Handler(BaseHTTPRequestHandler):
             self.error(401, "invalid_api_key", "A project gateway key is required.")
             return None
         digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
-        with database(self.server.state) as connection:
+        with database(self.gateway.state) as connection:
             row = connection.execute("SELECT name FROM projects WHERE digest = ?", (digest,)).fetchone()
         if row is None:
             self.error(401, "invalid_api_key", "Unknown project gateway key.")
             return None
-        settings = configuration(self.server.config)
+        settings = configuration(self.gateway.config)
         policy = settings.get("projects", {}).get(row["name"], settings["defaults"])
         return row["name"], settings, policy
 
     def do_GET(self):
         authorized = self.authorize()
         if authorized is None:
+            return
+        if self.path == '/v1/platform/rules':
+            try:
+                self.reply(200, {'text': Rules(self.gateway.rules_path).instructions()})
+            except (OSError, sqlite3.Error):
+                self.error(503, 'rules_unavailable', 'Shared rules are unavailable. Retry after the service is restored.')
             return
         if self.path != "/v1/models":
             self.error(404, "not_found", "Unknown gateway endpoint.")
@@ -191,7 +210,7 @@ class Handler(BaseHTTPRequestHandler):
         if type(tokens) is not int or tokens < 1 or not isinstance(body.get("messages"), list) or type(body.get("stream", False)) is not bool:
             self.error(400, "invalid_request", "Invalid messages, stream or output token limit.")
             return
-        if not reserve_request(self.server.state, project, policy["requests_per_day"]):
+        if not reserve_request(self.gateway.state, project, policy["requests_per_day"]):
             self.error(429, "project_quota_exceeded", "The project's daily request limit is exhausted; it resets at 00:00 UTC.")
             return
         outgoing = {key: value for key, value in body.items() if key in {
@@ -247,11 +266,12 @@ class Handler(BaseHTTPRequestHandler):
             upstream.close()
 
 
-def make_server(config, state, address):
+def make_server(config, state, address, *, rules_path=RULES_PATH):
     configuration(config)
-    server = ThreadingHTTPServer(address, Handler)
+    server = GatewayServer(address, Handler)
     server.config = Path(config)
     server.state = Path(state)
+    server.rules_path = Path(rules_path)
     return server
 
 

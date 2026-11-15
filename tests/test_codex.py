@@ -8,6 +8,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from codex_service import serve
+from shared_rules import Rules
 
 
 FAKE_CODEX = '''#!/usr/bin/python3
@@ -40,6 +41,8 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name)
+        self.rules = Rules(self.state / 'rules.sqlite3')
+        self.rules.initialize()
         (self.state / 'auth').mkdir()
         self.scenario('login_required')
         self.binary = self.state / 'codex'
@@ -56,7 +59,7 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(str(path))
         task = asyncio.create_task(serve(listener, project, state=self.state,
-                                         binary=str(self.binary), api_key=self.api_key))
+                                         binary=str(self.binary), api_key=self.api_key, rules_path=self.rules.path))
         async def cleanup():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
