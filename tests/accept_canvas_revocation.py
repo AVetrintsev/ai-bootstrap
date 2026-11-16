@@ -1,7 +1,7 @@
 """Revoke a real Canvas browser while its Qwen tool is running on the target VM.
 
 Usage: sudo BROWSER_PYTHON tests/accept_canvas_revocation.py PROJECT CHROMIUM
-Creates and removes two fixture sessions, one conversation and two marker files.
+Creates and removes two fixture sessions, one conversation and three marker files.
 """
 import hashlib
 import os
@@ -30,6 +30,7 @@ hashes = [hashlib.sha256(token.encode()).digest() for token in tokens]
 marker = 'revoke-' + secrets.token_hex(8)
 started = '/workspace/repo/.' + marker + '-started'
 finished = '/workspace/repo/.' + marker + '-finished'
+release = '/workspace/repo/.' + marker + '-release'
 conversation = None
 now = int(time.time())
 with sqlite3.connect(database) as db:
@@ -67,8 +68,9 @@ try:
         page.goto(f'http://localhost:8080/conversations/{conversation}?backend={project}')
         page.get_by_test_id('chat-input').wait_for()
         page.get_by_test_id('chat-input').fill(
-            f'Use the shell tool with timeout 60000 to run exactly: '
-            f"printf started > '{started}' && sleep 20 && printf finished > '{finished}'. "
+            'Use the shell tool with timeout 180000 to run exactly this command:\n'
+            f"printf started > '{started}' && for attempt in $(seq 1 150); do "
+            f"if test -f '{release}'; then printf finished > '{finished}'; exit 0; fi; sleep 1; done; exit 1\n"
             'Do not change any other files. After the command completes reply DONE.')
         page.get_by_test_id('chat-input').press('Enter')
         deadline = time.monotonic() + 240
@@ -93,7 +95,10 @@ try:
             page.wait_for_timeout(200)
         assert all(record['closed'] for record in live), 'Revocation did not close the existing Canvas connection'
         assert actor.request.get(api + '/' + conversation).status == 404
+        assert sandbox('test', '!', '-e', finished, check=False).returncode == 0, 'Tool finished before release'
         print('PASS owner revocation closes the open Canvas connection and denies new requests', flush=True)
+        # The tool cannot finish until revocation has actually closed the browser.
+        sandbox('touch', release)
         deadline = time.monotonic() + 180
         while time.monotonic() < deadline:
             response = owner.request.get(api + '/' + conversation)
@@ -110,6 +115,7 @@ try:
         browser.close()
 finally:
     try:
+        sandbox('touch', release)
         if conversation:
             cleanup = '''import json,pathlib,sys,urllib.request,urllib.error
 config=json.loads(pathlib.Path('/root/.config/ai-bootstrap/canvas.json').read_text())
@@ -123,7 +129,7 @@ for suffix,method in [('/pause','POST'),('','DELETE')]:
             sandbox('python3', '-c', cleanup, conversation)
     finally:
         try:
-            sandbox('rm', '-f', '--', started, finished)
+            sandbox('rm', '-f', '--', started, finished, release)
         finally:
             with sqlite3.connect(database) as db:
                 db.executemany('DELETE FROM sessions WHERE token_hash=?', [(value,) for value in hashes])
