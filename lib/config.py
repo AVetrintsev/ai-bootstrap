@@ -100,10 +100,13 @@ def validate_portal(portal):
         if not isinstance(address, str):
             raise ValueError("portal.expected_ipv4 must be an IPv4 address for https")
         try:
-            ipaddress.IPv4Address(address)
+            ipv4 = ipaddress.IPv4Address(address)
         except ValueError:
             raise ValueError("portal.expected_ipv4 must be an IPv4 address for https") from None
-    return transport
+        if not ipv4.is_global or ipv4.is_multicast:
+            raise ValueError("portal.expected_ipv4 must be a public unicast IPv4 address for https")
+        return transport, (domain.lower(), str(ipv4))
+    return transport, None
 
 
 def sandbox_internal_tcp(config):
@@ -152,7 +155,7 @@ def stage(config_path, work):
     if networks[0].prefixlen == 0 and not any_ipv4:
         raise ValueError("ssh.admin_ipv4 must restrict access to administrator networks")
 
-    transport = validate_portal(mapping(config.get("portal", {}), "portal"))
+    transport, public_endpoint = validate_portal(mapping(config.get("portal", {}), "portal"))
     profile = mapping(config.get("mihomo"), "mihomo").get("profile")
     validate_profile(profile)
     sandbox_enabled = "sandbox" in config
@@ -200,7 +203,19 @@ def stage(config_path, work):
         'meta skuid "ai-mihomo" meta nfproto ipv4 ct direction original jump mihomo_dial'
         if sandbox_enabled else "",
     )
-    (work / "firewall.nft").write_text(rules, encoding="utf-8")
+    def web_rules(inbound="", replies=""):
+        return rules.replace("@PUBLIC_WEB_INBOUND@", inbound).replace("@PUBLIC_WEB_REPLIES@", replies)
+
+    (work / "firewall.nft").write_text(web_rules(), encoding="utf-8")
+    if public_endpoint is not None:
+        (work / "portal-public").write_text(" ".join(public_endpoint) + "\n", encoding="utf-8")
+        (work / "firewall-public.nft").write_text(
+            web_rules(
+                "tcp dport { 80, 443 } ct state new accept",
+                "tcp sport { 80, 443 } ct direction reply ct state established accept",
+            ),
+            encoding="utf-8",
+        )
     (work / "admin-ipv4").write_text("\n".join(map(str, networks)), encoding="utf-8")
     (work / "profile.yaml").write_text(profile, encoding="utf-8")
     (work / "portal-transport").write_text(transport + "\n", encoding="utf-8")

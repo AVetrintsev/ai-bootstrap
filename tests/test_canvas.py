@@ -101,6 +101,18 @@ class CanvasTest(unittest.IsolatedAsyncioTestCase):
         with self.owner.connect() as db:
             self.assertEqual(db.execute("SELECT expires_at FROM sessions").fetchone()[0], self.now + SESSION_LIFETIME)
 
+    async def test_public_https_canvas_accepts_its_origin_and_sets_secure_cookie(self):
+        url = self.server.make_url("/canvas/activity")
+        cookie = {"ai_session": self.session}
+        headers = {"Host": "portal.example.org", "X-Portal-Scheme": "https"}
+        for origin in ("http://portal.example.org", "https://other.example.org"):
+            async with self.client.post(url, cookies=cookie, headers={**headers, "Origin": origin}) as response:
+                self.assertEqual(response.status, 403)
+        async with self.client.post(url, cookies=cookie,
+                                    headers={**headers, "Origin": "https://portal.example.org"}) as response:
+            self.assertEqual(response.status, 204)
+            self.assertTrue(response.cookies["ai_session"]["secure"])
+
     async def test_expiry_closes_idle_event_stream_without_waiting_for_an_agent_event(self):
         finished = asyncio.Event()
 

@@ -33,6 +33,10 @@ window.__AGENT_CANVAS_DO_NOT_TRACK__=true;
 def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"), check_interval=1):
     @web.middleware
     async def authenticated(request, handler):
+        # The Unix socket is private to Nginx and the portal service. Nginx
+        # replaces this header with the scheme of the browser connection.
+        if request.headers.get("X-Portal-Scheme") == "https":
+            request = request.clone(scheme="https")
         token = request.cookies.get("ai_session", "")
         if not await asyncio.to_thread(owner.has_session, token):
             raise web.HTTPNotFound()

@@ -47,6 +47,29 @@ portal_service=ai-bootstrap-portal.service
 portal_socket=ai-bootstrap-portal.socket
 portal_state=/var/lib/ai-portal
 local_portal_url=http://localhost:8080
+nginx_config=$etc/nginx.conf
+
+# shellcheck source=lib/nginx-portal.sh
+source "$release/lib/nginx-portal.sh"
+# shellcheck source=lib/public-portal.sh
+source "$release/lib/public-portal.sh"
+
+cleanup() {
+    local preserve_work=no
+    if [[ -n ${probe_dir:-} ]]; then
+        if ! rm -f -- "$probe_dir/body" || ! rmdir -- "$probe_dir"; then
+            printf 'ERROR install/cleanup: could not remove the temporary HTTPS probe file\n' >&2
+        fi
+    fi
+    if [[ ${restore_public_portal:-no} == yes ]]; then
+        if ! restore_portal; then
+            preserve_work=yes
+            printf 'ERROR install/rollback: preserved backups in %s\n' "$work" >&2
+        fi
+    fi
+    if [[ $preserve_work == no ]]; then rm -rf -- "$work"; fi
+    if [[ -n ${assets:-} ]]; then rm -rf -- "$assets"; fi
+}
 
 preflight() {
     [[ $EUID == 0 ]] || fail 'run as root'
@@ -65,7 +88,10 @@ preflight() {
     exec 8>/run/lock/ai-bootstrap-install.lock
     flock -n 8 || fail 'another installer is running'
     work=$(mktemp -d /run/ai-bootstrap.XXXXXX)
-    trap 'rm -rf -- "$work"; if [[ -n ${assets:-} ]]; then rm -rf -- "$assets"; fi' EXIT
+    trap cleanup EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     # Large public packages must not exhaust /run (a small tmpfs on Ubuntu).
     # Keep secrets in $work; stage binaries beside /opt for same-filesystem moves.
     assets=$(mktemp -d /opt/.ai-bootstrap.XXXXXX)
@@ -80,6 +106,9 @@ preflight() {
     reason=$(python3 -I "$release/lib/config.py" "$config" "$work" 2>&1) ||
         fail "${reason%%$'\n'*}"
     read -r portal_transport < "$work/portal-transport"
+    if [[ $portal_transport == https ]]; then
+        read -r portal_domain portal_ipv4 < "$work/portal-public"
+    fi
     read -r sandbox_enabled _ < "$work/sandbox-settings"
     [[ $(readlink -f /etc/resolv.conf) == /run/systemd/resolve/stub-resolv.conf ]] ||
         fail 'expected /etc/resolv.conf to use the systemd-resolved stub'
@@ -165,9 +194,12 @@ publish() {
     if cmp -s -- "$source" "$target" && [[ $(stat -c '%a:%U:%G' "$target") == "$mode:root:$group" ]]; then
         return
     fi
-    staged=$(mktemp "${target}.XXXXXX")
-    install -o root -g "$group" -m "$mode" -- "$source" "$staged"
-    mv -fT -- "$staged" "$target"
+    staged=$(mktemp "${target}.XXXXXX") || return 1
+    if ! install -o root -g "$group" -m "$mode" -- "$source" "$staged" ||
+       ! mv -fT -- "$staged" "$target"; then
+        rm -f -- "$staged"
+        return 1
+    fi
 }
 
 validate_network() {
@@ -193,13 +225,16 @@ EOF
     fi
     [[ $(grep '^port ' "$work/ssh-effective") == 'port 22' ]] ||
         fail 'expected the SSH configuration to use only TCP port 22'
-    if [[ $portal_transport == local-http ]]; then
+    if [[ $portal_transport == local-http ]] || installed_local_portal; then
         grep -Eq '^allowtcpforwarding (yes|all|local)$' "$work/ssh-effective" &&
             grep -qx 'disableforwarding no' "$work/ssh-effective" &&
             grep -Eq '^permitopen (.* )?(any|127\.0\.0\.1:8080|127\.0\.0\.1:\*|\*:8080|\*:\*)( |$)' "$work/ssh-effective" ||
             fail 'sshd must allow local TCP forwarding to 127.0.0.1:8080'
     fi
     quiet 'nftables rejected the candidate firewall' nft --check --file "$work/firewall.nft"
+    if [[ $portal_transport == https ]]; then
+        quiet 'nftables rejected the HTTPS firewall' nft --check --file "$work/firewall-public.nft"
+    fi
 }
 
 configure_ssh() {
@@ -213,7 +248,11 @@ configure_ssh() {
 }
 
 configure_firewall() {
-    publish "$work/firewall.nft" "$etc/firewall.nft" 600
+    local firewall=$work/firewall.nft
+    if [[ $portal_transport == https ]] && installed_public_portal; then
+        firewall=$work/firewall-public.nft
+    fi
+    publish "$firewall" "$etc/firewall.nft" 600
     publish "$release/lib/$firewall_unit" "/etc/systemd/system/$firewall_unit" 644
     quiet 'could not load firewall unit' systemctl daemon-reload
     # Always reload the table in case another tool removed it from the kernel.
@@ -510,25 +549,31 @@ configure_portal() {
     quiet 'could not start the portal' systemctl restart "$portal_service"
 }
 
-configure_local_http() {
+portal_nginx_package() {
     local unit=nginx.service dropin=/etc/systemd/system/nginx.service.d
-    local nginx_config=$release/lib/nginx-local-http.conf
-    local unit_config=$release/lib/nginx-local-http.service.conf
-    if [[ -x /usr/sbin/nginx ]]; then
-        quiet 'nginx rejected the candidate configuration' /usr/sbin/nginx -t -q -c "$nginx_config"
-    fi
+    local unit_config=$release/lib/nginx-portal.service.conf
     # Install the override before apt can start the vendor service with the default site.
     install -d -m 0755 "$dropin"
-    publish "$nginx_config" "$etc/nginx.conf" 644
+    if [[ ! -e $nginx_config ]]; then
+        render_nginx no idle > "$work/nginx-idle.conf"
+        publish "$work/nginx-idle.conf" "$nginx_config" 644
+    fi
     publish "$unit_config" "$dropin/90-ai-bootstrap.conf" 644
     quiet 'could not load the nginx override' systemctl daemon-reload
-    if [[ $(dpkg-query -W -f='${db:Status-Status}' nginx 2>/dev/null) != installed ]]; then
-        quiet 'could not refresh package indexes for nginx' apt-get -q update
-        quiet 'could not install nginx' apt-get -qy --no-install-recommends install nginx
-    fi
-    quiet 'nginx rejected the installed configuration' /usr/sbin/nginx -t -q -c "$etc/nginx.conf"
-    quiet 'could not apply the local nginx configuration' systemctl restart "$unit"
+    ensure_packages nginx
     quiet 'could not enable nginx at boot' systemctl enable "$unit"
+}
+
+apply_nginx() {
+    local candidate=$1
+    quiet 'nginx rejected the candidate configuration' /usr/sbin/nginx -t -q -c "$candidate"
+    publish "$candidate" "$nginx_config" 644
+    quiet 'could not apply the nginx configuration' systemctl restart nginx.service
+}
+
+configure_local_http() {
+    render_nginx yes local > "$work/nginx-local.conf"
+    apply_nginx "$work/nginx-local.conf"
 }
 
 verify_local_http() {
@@ -567,6 +612,14 @@ run_step configure_ssh
 run_step configure_firewall
 run_step configure_mihomo
 run_step verify_egress
+if [[ $portal_transport == https ]]; then
+    run_step public_dns
+    run_step portal_nginx_package
+    run_step certbot_packages
+    run_step begin_public_https
+    run_step acme
+    run_step globalping
+fi
 if [[ $sandbox_enabled == yes ]]; then
     run_step sandbox_packages
 fi
@@ -574,9 +627,10 @@ run_step configure_sandbox
 run_step configure_shared_rules
 run_step configure_model_gateway
 run_step configure_memory
+run_step portal_packages
+run_step configure_portal
 if [[ $portal_transport == local-http ]]; then
-    run_step portal_packages
-    run_step configure_portal
+    run_step portal_nginx_package
     run_step configure_local_http
     run_step verify_local_http
     skip_step public_dns 'local-http needs no public DNS'
@@ -585,6 +639,11 @@ if [[ $portal_transport == local-http ]]; then
     printf '%s\n' 'From an allowed administrator address, run:' \
         '  ssh -4 -NT -o ExitOnForwardFailure=yes -L 127.0.0.1:8080:127.0.0.1:8080 USER@AI_HOST' \
         'Open the owner activation URL in your browser. If already activated, use http://localhost:8080.'
-    step=owner_activation
-    show_activation "$local_portal_url"
+    portal_url=$local_portal_url
+else
+    run_step configure_public_https
+    portal_url=https://$portal_domain
+    printf 'Portal: %s\n' "$portal_url"
 fi
+step=owner_activation
+show_activation "$portal_url"

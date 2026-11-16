@@ -47,6 +47,7 @@ table inet ai_bootstrap {
 
     chain direct_ipv4 {
         ip daddr @administrators tcp sport 22 ct direction reply ct state established accept
+        @PUBLIC_WEB_REPLIES@
         udp sport 68 udp dport 67 accept
         meta skuid "ai-mihomo" accept
     }
@@ -69,6 +70,7 @@ table inet ai_bootstrap {
         ct state established,related accept
         udp sport 67 udp dport 68 accept
         ip saddr @administrators tcp dport 22 ct state new accept
+        @PUBLIC_WEB_INBOUND@
     }
 
     chain forward {
