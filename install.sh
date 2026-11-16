@@ -411,7 +411,7 @@ configure_canvas() {
     fi
     install -d -m 0750 -o root -g ai-portal /var/lib/ai-canvas /var/lib/ai-canvas/connections
     local file unit
-    for file in canvas.py canvas-reasoning.js canvas-agent.py canvas-relay.py canvas-setup.sh; do
+    for file in canvas.py canvas-reasoning.js canvas-agent.py canvas-agent-options.py canvas-relay.py canvas-setup.sh; do
         publish "$release/lib/$file" "$libexec/$file" 644
     done
     publish "$release/lib/canvas-exec" "$libexec/canvas-exec" 755

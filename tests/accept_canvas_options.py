@@ -85,12 +85,12 @@ def check(page, profile_id, name):
     try:
         page.goto(f"{origin}/conversations/{identifier}?backend={project}")
         editor = page.get_by_test_id("chat-input")
-        prompt(page, endpoint, editor, "READY")
-        print(f"{name}: first response received", flush=True)
         picker = page.get_by_test_id("ai-bootstrap-reasoning")
-        picker.wait_for(timeout=30000)
+        picker.wait_for(timeout=60000)
         model = page.get_by_test_id("chat-input-llm-model")
         model.wait_for(timeout=30000)
+        prompt(page, endpoint, editor, "READY")
+        print(f"{name}: controls appeared before the first message and first response received", flush=True)
         info = json.loads(api(page, endpoint))
         assert info["available_models"], name
         original_model = info["current_model_id"]

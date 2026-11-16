@@ -400,6 +400,7 @@ configure_canvas() {
     source /etc/ai-bootstrap/sandbox-release.env
     local generation previous
     generation="$AGENT_SERVER_VERSION:$(sha256sum /usr/local/libexec/ai-bootstrap/canvas-agent.py \
+        /usr/local/libexec/ai-bootstrap/canvas-agent-options.py \
         /usr/local/libexec/ai-bootstrap/project-tools-setup.sh \
         /usr/local/libexec/ai-bootstrap/qwen-launcher \
         /usr/local/libexec/ai-bootstrap/project-graph.py /usr/local/libexec/ai-bootstrap/codegraph-worker.py \
@@ -422,6 +423,7 @@ os.chown(path,0,grp.getgrnam('ai-portal').gr_gid)
 PY
     as_project podman exec project install -d -m 0700 /opt/ai-canvas-control /root/.config/ai-bootstrap
     as_project podman cp /usr/local/libexec/ai-bootstrap/canvas-agent.py project:/opt/ai-canvas-control/agent.py
+    as_project podman cp /usr/local/libexec/ai-bootstrap/canvas-agent-options.py project:/opt/ai-canvas-control/agent_options.py
     # The host's root-owned record is not readable by the sandbox user. Send it on stdin.
     as_project podman exec --interactive project sh -c 'umask 077; cat > /root/.config/ai-bootstrap/canvas.json' \
         < "/var/lib/ai-canvas/connections/$project.json"

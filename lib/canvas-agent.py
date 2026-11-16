@@ -30,7 +30,8 @@ if mode == "run":
         OH_ENABLE_VSCODE="false", DO_NOT_TRACK="1")
     pidfile.write_text(str(os.getpid()))
     python = "/opt/ai-agent/bin/python"
-    os.execve(python, [python, "-m", "openhands.agent_server", "--host", "127.0.0.1", "--port", "18000"], environment)
+    os.execve(python, [python, "-m", "openhands.agent_server", "--host", "127.0.0.1", "--port", "18000",
+                      "--extra-python-path", "/opt/ai-canvas-control", "--import-modules", "agent_options"], environment)
 
 if mode != "configure":
     sys.exit("Expected run, stop or configure")
