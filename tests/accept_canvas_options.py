@@ -74,6 +74,7 @@ def prompt(page, endpoint, editor, word):
 
 def check(page, profile_id, name):
     identifier = str(uuid.uuid4())
+    print(f"{name}: temporary conversation {identifier}", flush=True)
     endpoint = f"conversations/{identifier}"
     api(page, "conversations", "POST", {
         "conversation_id": identifier,
@@ -85,12 +86,27 @@ def check(page, profile_id, name):
     try:
         page.goto(f"{origin}/conversations/{identifier}?backend={project}")
         editor = page.get_by_test_id("chat-input")
-        prompt(page, endpoint, editor, "READY")
-        print(f"{name}: first response received", flush=True)
         picker = page.get_by_test_id("ai-bootstrap-reasoning")
-        picker.wait_for(timeout=30000)
+        try:
+            picker.wait_for(timeout=60000)
+        except BrowserTimeout:
+            info = json.loads(api(page, endpoint + "?initialize_acp=false"))
+            raise AssertionError(
+                f"{name}: controls unavailable in a new conversation "
+                f"(state={info['execution_status']}, models={len(info['available_models'])}, "
+                f"efforts={len(info['available_efforts'])})"
+            ) from None
         model = page.get_by_test_id("chat-input-llm-model")
         model.wait_for(timeout=30000)
+        page.set_viewport_size({"width": 390, "height": 850})
+        picker.wait_for()
+        assert picker.evaluate(
+            "el => { const bounds = el.getBoundingClientRect(); "
+            "return bounds.width > 0 && bounds.left >= 0 && bounds.right <= innerWidth; }"
+        ), name
+        page.set_viewport_size({"width": 1440, "height": 1000})
+        prompt(page, endpoint, editor, "READY")
+        print(f"{name}: controls appeared before the first message and first response received", flush=True)
         info = json.loads(api(page, endpoint))
         assert info["available_models"], name
         original_model = info["current_model_id"]
@@ -103,8 +119,11 @@ def check(page, profile_id, name):
                 page.get_by_test_id(f"chat-input-acp-model-option-{value}").click()
                 wait_for_value(page, endpoint, "current_model_id", value)
             info = json.loads(api(page, endpoint))
-        effort = next(option["value"] for option in info["available_efforts"]
-                      if option["value"] in ("low", "medium", "high") and option["value"] != info["current_effort"])
+        offered_efforts = {option["value"] for option in info["available_efforts"]}
+        if name == "qwen-code":
+            assert "high" in offered_efforts, offered_efforts
+        effort = next(value for value in ("high", "medium", "low")
+                      if value in offered_efforts and value != info["current_effort"])
         picker.select_option(effort)
         wait_for_value(page, endpoint, "current_effort", effort)
         page.reload()
@@ -120,7 +139,8 @@ def check(page, profile_id, name):
 try:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=chromium, headless=True, args=[
-            "--no-sandbox", f"--host-resolver-rules=MAP {address.hostname} 127.0.0.1",
+            "--no-sandbox", "--disable-dev-shm-usage",
+            f"--host-resolver-rules=MAP {address.hostname} 127.0.0.1",
         ])
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         context.add_cookies([{"name": "ai_session", "value": token, "url": origin,

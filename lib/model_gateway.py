@@ -123,7 +123,11 @@ def provision(config, state, project):
         model = settings["models"][alias]
         capabilities = {"vision": model["vision"]} if "vision" in model else {}
         if "reasoning_efforts" in model:
-            capabilities["reasoning"] = {"profile": "openai-reasoning", "efforts": model["reasoning_efforts"]}
+            efforts = model["reasoning_efforts"]
+            capabilities["reasoning"] = {
+                "profile": "openai-reasoning", "efforts": efforts,
+                "defaultEffort": "medium" if "medium" in efforts else efforts[0],
+            }
         qwen_models.append({
             "id": alias, "envKey": "OPENAI_API_KEY", "baseUrl": "${OPENAI_BASE_URL}",
             "capabilities": capabilities,

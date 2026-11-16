@@ -101,6 +101,40 @@ class CanvasTest(unittest.IsolatedAsyncioTestCase):
         with self.owner.connect() as db:
             self.assertEqual(db.execute("SELECT expires_at FROM sessions").fetchone()[0], self.now + SESSION_LIFETIME)
 
+    async def test_conversation_read_loads_agent_options_with_project_key(self):
+        identifier = "9b09f6a9-6aa7-428e-ac51-19a57a237424"
+        path = f"/api/conversations/{identifier}"
+        calls = []
+
+        async def get_conversation(request):
+            calls.append((request.path, request.headers.get("X-Session-API-Key")))
+            if request.path.endswith("/agent_options") and len(calls) > 1:
+                raise web.HTTPNotFound()
+            return web.json_response({"path": request.path})
+
+        backend = web.Application()
+        backend.router.add_get(path, get_conversation)
+        backend.router.add_get(path + "/agent_options", get_conversation)
+        runner = web.AppRunner(backend)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        await web.UnixSite(runner, str(self.root / "gh-7.sock")).start()
+        (self.root / "gh-7.json").write_text(json.dumps({"key": "private-project-key"}))
+
+        url = self.server.make_url("/agent/gh-7" + path)
+        async with self.client.get(url) as response:
+            self.assertEqual(response.status, 404)
+        self.assertEqual(calls, [])
+        for expected in (path + "/agent_options", path):
+            async with self.client.get(url, cookies={"ai_session": self.session}) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual((await response.json())["path"], expected)
+        async with self.client.get(url.with_query(initialize_acp="false"),
+                                   cookies={"ai_session": self.session}) as response:
+            self.assertEqual((await response.json())["path"], path)
+        self.assertEqual(calls, [(path + "/agent_options", "private-project-key")] * 2
+                         + [(path, "private-project-key")] * 2)
+
     async def test_expiry_closes_idle_event_stream_without_waiting_for_an_agent_event(self):
         finished = asyncio.Event()
 

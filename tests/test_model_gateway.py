@@ -140,7 +140,9 @@ class GatewayTests(unittest.TestCase):
         catalog = model_gateway.provision(self.config, self.state, "alpha")["qwen_models"]
         self.assertEqual([item["id"] for item in catalog], ["coder"])
         self.assertEqual(catalog[0]["capabilities"], {
-            "vision": True, "reasoning": {"profile": "openai-reasoning", "efforts": ["low", "high"]},
+            "vision": True, "reasoning": {
+                "profile": "openai-reasoning", "efforts": ["low", "high"], "defaultEffort": "low",
+            },
         })
         self.assertEqual(catalog[0]["envKey"], "OPENAI_API_KEY")
         request = {"model": "coder", "messages": []}

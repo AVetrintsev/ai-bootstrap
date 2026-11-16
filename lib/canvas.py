@@ -1,7 +1,7 @@
 """Session-gated Canvas frontend and per-project Agent Server transport."""
 
 import asyncio
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 import json
 from pathlib import Path
 import re
@@ -14,6 +14,7 @@ from portal import KEY, STATE, SESSION_LIFETIME, OwnerAccess, digest, foreground
 
 
 PROJECT = re.compile(r"gh-[1-9][0-9]{0,18}")
+CONVERSATION_PATH = re.compile(r"api/conversations/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 SAFE_HEADERS = {"content-type", "accept", "range", "if-none-match", "x-expose-secrets"}
 RESPONSE_HEADERS = {"content-type", "content-range", "accept-ranges", "etag"}
 ACTIVITY_SCRIPT = """<script>
@@ -124,6 +125,21 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
             else:
                 break
 
+    @asynccontextmanager
+    async def project_response(upstream, request, path, query, headers):
+        url = "http://localhost/" + path
+        if (request.method == "GET" and CONVERSATION_PATH.fullmatch(path)
+                and request.query.get("initialize_acp") != "false"):
+            # Agent Server from a previous release may not have this route yet.
+            async with upstream.get(url + "/agent_options", params=query, headers=headers,
+                                    allow_redirects=False) as remote:
+                if remote.status == 200:
+                    yield remote
+                    return
+        async with upstream.request(request.method, url, params=query, headers=headers,
+                                    data=request.content, allow_redirects=False) as remote:
+            yield remote
+
     async def proxy(request):
         project = request.match_info["project"]
         config = connection(project)
@@ -133,7 +149,8 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
         headers = {key: value for key, value in request.headers.items() if key.lower() in SAFE_HEADERS}
         headers["X-Session-API-Key"] = config["key"]
         # Neither the portal cookie nor a caller-selected destination/key reaches the sandbox.
-        query = [(key, value) for key, value in request.query.items() if key not in ("session_api_key", "api_key")]
+        query = [(key, value) for key, value in request.query.items()
+                 if key not in ("session_api_key", "api_key", "initialize_acp")]
         url = "http://localhost/" + path
         watcher = asyncio.create_task(watch_session(request))
         try:
@@ -153,8 +170,7 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
                             await asyncio.gather(*tasks, return_exceptions=True)
                             await browser.close()
                         return browser
-                async with upstream.request(request.method, url, params=query, headers=headers,
-                                            data=request.content, allow_redirects=False) as remote:
+                async with project_response(upstream, request, path, query, headers) as remote:
                     response = web.StreamResponse(status=remote.status,
                         headers={key: value for key, value in remote.headers.items() if key.lower() in RESPONSE_HEADERS})
                     response.headers["Cache-Control"] = "no-store"
