@@ -1,6 +1,7 @@
 #!/usr/bin/python3 -I
 """Project terminal and ACP client; no OpenAI credentials or host RPC."""
 import json
+import os
 import select
 import socket
 import sys
@@ -53,7 +54,10 @@ def main():
                 sys.exit('Соединение с Codex закрыто. Выполнение остановлено.')
 
             call('initialize', {'protocolVersion': 1, 'clientCapabilities': {}})
-            session = call('session/new', {'cwd': '/workspace/repo', 'mcpServers': []})['sessionId']
+            cwd = os.getcwd()
+            if cwd != '/workspace/repo' and not cwd.startswith(('/workspace/repo/', '/workspace/worktrees/')):
+                cwd = '/workspace/repo'
+            session = call('session/new', {'cwd': cwd, 'mcpServers': []})['sessionId']
             arguments = sys.argv[1:]
             if arguments and arguments[0] == 'exec':
                 arguments = arguments[1:]

@@ -8,7 +8,6 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
 from codex_service import serve
-from shared_rules import Rules
 
 
 FAKE_CODEX = '''#!/usr/bin/python3
@@ -41,8 +40,6 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.state = Path(self.temp.name)
-        self.rules = Rules(self.state / 'rules.sqlite3')
-        self.rules.initialize()
         (self.state / 'auth').mkdir()
         self.scenario('login_required')
         self.binary = self.state / 'codex'
@@ -59,7 +56,7 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(str(path))
         task = asyncio.create_task(serve(listener, project, state=self.state,
-                                         binary=str(self.binary), api_key=self.api_key, rules_path=self.rules.path))
+                                         binary=str(self.binary), api_key=self.api_key))
         async def cleanup():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -108,65 +105,6 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
         self.binary.chmod(0o700)
         self.assertEqual((await self.request('status'))['status'], 'login_required')
 
-    async def test_executor_failure_and_profile_change_complete_the_turn_instead_of_leaving_it_pending(self):
-        home = self.state / 'projects/gh-123/chatgpt'
-        home.mkdir(parents=True)
-        scenario = home / 'scenario.json'
-        scenario.write_text('{"status":"ready","executor":true}')
-        path = self.state / 'project.sock'
-        await self.start(path, 'gh-123')
-        reader, writer = await asyncio.open_unix_connection(str(path))
-        try:
-            writer.write(b'{"id":1,"method":"session/new","params":{"cwd":"/workspace/repo","mcpServers":[]}}\n')
-            await writer.drain()
-            created = json.loads(await asyncio.wait_for(reader.readline(), 3))
-            self.assertEqual(created['result']['sessionId'], 'fixture-thread')
-            scenario.write_text('{"status":"ready","executor":false}')
-            writer.write(b'{"id":2,"method":"session/prompt","params":{"sessionId":"fixture-thread","prompt":[{"type":"text","text":"write a file"}]}}\n')
-            await writer.drain()
-            message = json.loads(await asyncio.wait_for(reader.readline(), 3))
-            self.assertIn('Исполнитель проекта недоступен', message['params']['update']['content']['text'])
-            response = json.loads(await asyncio.wait_for(reader.readline(), 3))
-            self.assertEqual(response['result']['stopReason'], 'refusal')
-            self.assertEqual(response['result']['_meta']['ai-bootstrap/error'], 'executor_unavailable')
-            scenario.write_text('{"status":"ready","executor":true}')
-            (self.state / 'profile').write_text('api')
-            writer.write(b'{"id":3,"method":"session/prompt","params":{"sessionId":"fixture-thread","prompt":[{"type":"text","text":"write a file"}]}}\n')
-            await writer.drain()
-            message = json.loads(await asyncio.wait_for(reader.readline(), 3))
-            self.assertIn('Способ оплаты изменён', message['params']['update']['content']['text'])
-            response = json.loads(await asyncio.wait_for(reader.readline(), 3))
-            self.assertEqual(response['result']['stopReason'], 'refusal')
-            self.assertEqual(response['result']['_meta']['ai-bootstrap/error'], 'profile_changed')
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    async def test_sandbox_protocol_cannot_change_auth_environment_or_host_configuration(self):
-        path = self.state / 'project.sock'
-        await self.start(path, 'gh-123')
-        reader, writer = await asyncio.open_unix_connection(str(path))
-        try:
-            requests = [
-                ('account/read', {}), ('account/login/start', {'type': 'apiKey', 'apiKey': 'untrusted'}),
-                ('environment/add', {'id': 'local'}), ('fs/readFile', {'path': '/var/lib/ai-codex/auth/auth.json'}),
-                ('session/new', {'cwd': '/var/lib/ai-codex', 'mcpServers': []}),
-                ('session/new', {'cwd': '/workspace/repo', 'mcpServers': [{'command': 'sh'}]}),
-                ('session/new', ['invalid']), ('session/prompt', {'prompt': [None]}),
-                (['invalid-method'], {}),
-                ('session/load', {'cwd': '/workspace/repo', 'sessionId': None}),
-                ('session/load', {'cwd': '/workspace/repo', 'sessionId': {}}),
-            ]
-            for key, (method, params) in enumerate(requests):
-                writer.write(json.dumps({'id': key, 'method': method, 'params': params}).encode() + b'\n')
-                await writer.drain()
-                result = json.loads(await asyncio.wait_for(reader.readline(), 3))
-                self.assertEqual(result['id'], key)
-                self.assertIn('error', result, method)
-                self.assertNotIn('private', json.dumps(result))
-        finally:
-            writer.close()
-            await writer.wait_closed()
 
 
 if __name__ == '__main__':

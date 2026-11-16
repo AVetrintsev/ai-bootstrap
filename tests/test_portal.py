@@ -23,6 +23,13 @@ from portal import Portal, print_activation_url
 
 
 class PortalTest(unittest.TestCase):
+    def test_removed_shared_rules_have_no_page_or_mutation_routes(self):
+        cookie, _, _ = self.enroll()
+        self.assertNotIn(b'href="/rules"', self.request('/', cookie=cookie)[2])
+        for path in ('/rules', '/rules/add', '/rules/save', '/rules/delete'):
+            self.assertEqual(self.request(path, cookie=cookie)[0], 404)
+            self.assertEqual(self.request(path, cookie=cookie, form={'content': 'ignored'})[0], 404)
+
     def test_codex_page_distinguishes_limits_and_requires_confirmed_csrf_protected_billing_change(self):
         import json
         state = {'status': 'login_required', 'profile': 'chatgpt', 'api_configured': True}

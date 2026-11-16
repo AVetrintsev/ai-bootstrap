@@ -138,7 +138,6 @@ async def check():
         response = await call(3, 'session/prompt', {'sessionId': session,
             'prompt': [{'type': 'text', 'text': 'Write /workspace/repo/.task10-down'}]})
         assert response['result']['stopReason'] == 'refusal', response
-        assert response['result']['_meta']['ai-bootstrap/error'] == 'executor_unavailable', response
         result = subprocess.run(['ai-sandbox', 'shell', project, 'codex', 'exec', 'Write /workspace/repo/.task10-down'],
                                 capture_output=True, text=True, timeout=30)
         assert result.returncode != 0 and 'Исполнитель' in result.stderr, result

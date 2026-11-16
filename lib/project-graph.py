@@ -16,6 +16,8 @@ PID = Path('/run/ai-codegraph.pid')
 
 
 def client():
+    if Path.cwd().is_relative_to('/workspace/worktrees'):
+        sys.exit('The shared code graph indexes /workspace/repo only. Use Serena in a worktree.')
     with socket.socket(socket.AF_UNIX) as connection:
         connection.connect(SOCKET)
         with connection.makefile('rb') as reader:

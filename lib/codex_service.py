@@ -1,4 +1,4 @@
-"""Private Codex login control and project-scoped ACP bridge.
+"""Private Codex login control; project ACP is provided by codex-acp.
 
 Only this trusted service sees ChatGPT credentials. The sandbox can send ACP
 messages, never app-server RPC, configuration, credentials, or host commands.
@@ -16,7 +16,6 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from shared_rules import RULES_PATH, Rules
 
 STATE = Path('/var/lib/ai-codex')
 BINARY = '/opt/ai-codex/bin/codex'
@@ -213,195 +212,22 @@ class LoginControl:
             await self.server.close()
 
 
-class ProjectSession:
-    def __init__(self, project, writer, *, state=STATE, binary=BINARY, api_key=API_KEY, rules_path=RULES_PATH):
-        self.project, self.writer, self.state, self.binary, self.api_key = project, writer, state, binary, api_key
-        self.server = None
-        self.session = None
-        self.turn = None
-        self.profile = None
-        self.model = None
-        self.rules = Rules(rules_path)
-
-    async def send(self, message):
-        self.writer.write(json.dumps({'jsonrpc': '2.0', **message}).encode() + b'\n')
-        await self.writer.drain()
-
-    async def update(self, update):
-        await self.send({'method': 'session/update', 'params': {'sessionId': self.session, 'update': update}})
-
-    async def executor(self):
-        try:
-            await self.server.call('environment/info', {'environmentId': 'project'}, timeout=10)
-        except CodexError:
-            raise CodexError('executor_unavailable') from None
-
-    async def connect(self, params, resume=False):
-        if self.server or params.get('cwd') != '/workspace/repo' or params.get('mcpServers'):
-            raise ValueError('Требуется /workspace/repo без дополнительных MCP-серверов.')
-        self.profile = selected_profile(self.state)
-        home = self.state / 'projects' / self.project / self.profile
-        identifier = params.get('sessionId')
-        if resume and (not isinstance(identifier, str) or not re.fullmatch(r'[a-zA-Z0-9-]{1,100}', identifier)
-                       or not (home / 'sessions-allowed' / identifier).is_file()):
-            raise ValueError('Разговор не принадлежит этому проекту и способу оплаты.')
-        key = self.api_key.read_text().strip() if self.profile == 'api' else None
-        self.server = AppServer(home, binary=self.binary, api_key=key)
-        await self.server.start()
-        await self.executor()
-        account = (await self.server.call('account/read')).get('account')
-        if self.profile == 'chatgpt' and (not account or account.get('type') != 'chatgpt'):
-            raise CodexError('login_required')
-        args = {'cwd': '/workspace/repo', 'approvalPolicy': 'never', 'sandbox': 'danger-full-access',
-                'developerInstructions': self.rules.instructions()}
-        if resume:
-            args['threadId'] = identifier
-        # Required project MCP servers must finish starting before the first turn.
-        result = await self.server.call('thread/resume' if resume else 'thread/start', args, timeout=150)
-        self.session = result['thread']['id']
-        self.model = result['model']
-        allowed = home / 'sessions-allowed'
-        allowed.mkdir(exist_ok=True, mode=0o700)
-        (allowed / self.session).touch(mode=0o600)
-        return {'sessionId': self.session, 'modes': {'currentModeId': 'project', 'availableModes': [
-            {'id': 'project', 'name': 'Песочница проекта', 'description': 'Команды и файлы только в контейнере проекта.'}]}}
-
-    async def prompt(self, params):
-        if not self.server or params.get('sessionId') != self.session:
-            raise ValueError('Неизвестный разговор.')
-        if selected_profile(self.state) != self.profile:
-            raise CodexError('profile_changed')
-        parts = params.get('prompt', [])
-        if not isinstance(parts, list) or not parts or any(not isinstance(p, dict) or p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in parts):
-            raise ValueError('Поддерживаются текстовые сообщения.')
-        await self.executor()
-        result = await self.server.call('turn/start', {'threadId': self.session,
-            'input': [{'type': 'text', 'text': p['text'], 'text_elements': []} for p in parts]})
-        self.turn = result['turn']['id']
-        completed = False
-        try:
-            async with asyncio.timeout(600):
-                while True:
-                    event = await self.server.events.get()
-                    method, values = event['method'], event.get('params', {})
-                    if method == 'bridge/closed':
-                        raise CodexError()
-                    if values.get('threadId') != self.session:
-                        continue
-                    if method == 'item/agentMessage/delta':
-                        await self.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': values['delta']}})
-                    elif method in ('item/started', 'item/completed'):
-                        item = values['item']
-                        if item['type'] in ('commandExecution', 'fileChange', 'mcpToolCall'):
-                            content = item.get('aggregatedOutput') or json.dumps(item.get('changes') or item.get('result') or {}, ensure_ascii=False)
-                            update = {'sessionUpdate': 'tool_call' if method == 'item/started' else 'tool_call_update',
-                                      'toolCallId': item['id'], 'status': 'in_progress' if method == 'item/started' else ('failed' if item.get('status') == 'failed' else 'completed'),
-                                      'title': item.get('command') or item.get('tool') or 'Изменение файлов',
-                                      'kind': {'commandExecution': 'execute', 'fileChange': 'edit', 'mcpToolCall': 'other'}[item['type']],
-                                      'content': [{'type': 'content', 'content': {'type': 'text', 'text': content}}]}
-                            await self.update(update)
-                    elif method == 'turn/completed' and values['turn']['id'] == self.turn:
-                        turn = values['turn']
-                        if turn['status'] == 'failed':
-                            raise CodexError(error_kind(turn.get('error') or {}))
-                        await self.executor()
-                        completed = True
-                        return {'stopReason': 'cancelled' if turn['status'] == 'interrupted' else 'end_turn'}
-        finally:
-            if not completed:
-                with suppress(CodexError, OSError):
-                    await self.server.call('turn/interrupt', {'threadId': self.session, 'turnId': self.turn}, timeout=5)
-            self.turn = None
-
-    async def handle(self, message):
-        key, method, params = message.get('id'), message.get('method'), message.get('params') or {}
-        try:
-            if not isinstance(method, str) or (key is not None and type(key) not in (str, int)):
-                raise ValueError('Недействительный запрос.')
-            if not isinstance(params, dict):
-                raise ValueError('Ожидается объект параметров.')
-            if method == 'initialize':
-                result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True},
-                          'agentInfo': {'name': 'ai-bootstrap-codex', 'version': '1'}, 'authMethods': []}
-            elif method in ('session/new', 'session/load'):
-                result = await self.connect(params, method == 'session/load')
-            elif method == 'session/prompt':
-                result = await self.prompt(params)
-            elif method == 'session/cancel':
-                if self.turn and params.get('sessionId') == self.session:
-                    await self.server.call('turn/interrupt', {'threadId': self.session, 'turnId': self.turn})
-                return
-            elif method == 'session/set_mode' and self.session and params.get('modeId') == 'project' and params.get('sessionId') == self.session:
-                result = {}
-            else:
-                raise ValueError('Этот метод недоступен из песочницы.')
-            if key is not None:
-                await self.send({'id': key, 'result': result})
-        except (ValueError, CodexError, OSError, sqlite3.Error, KeyError, asyncio.TimeoutError) as error:
-            kind = error.kind if isinstance(error, CodexError) else 'unavailable'
-            if method in ('session/new', 'session/load') and self.server and not self.session:
-                await self.server.close()
-                self.server = None
-            if method == 'session/prompt' and isinstance(error, (CodexError, OSError, asyncio.TimeoutError)):
-                # A completed refusal is terminal in ACP. A transport error leaves
-                # the Canvas user message pending and can replay it on restart.
-                await self.update({'sessionUpdate': 'agent_message_chunk',
-                                   'content': {'type': 'text', 'text': 'Ошибка: ' + MESSAGES[kind]}})
-                if key is not None:
-                    await self.send({'id': key, 'result': {'stopReason': 'refusal', '_meta': {'ai-bootstrap/error': kind}}})
-                return
-            if key is not None:
-                await self.send({'id': key, 'error': {'code': -32000, 'message': str(error) if isinstance(error, (CodexError, ValueError)) else MESSAGES[kind], 'data': {'kind': kind}}})
-
-    async def close(self):
-        if self.server:
-            await self.server.close()
-
-
-async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=API_KEY, rules_path=RULES_PATH):
-    control = LoginControl(state, binary=binary, api_key=api_key) if project is None else None
-    slots = asyncio.Semaphore(2)
+async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=API_KEY):
+    if project:
+        from codex_acp import serve as serve_project
+        return await serve_project(listener, project, state=state, binary=binary, api_key=api_key)
+    control = LoginControl(state, binary=binary, api_key=api_key)
 
     async def client(reader, writer):
-        session = ProjectSession(project, writer, state=state, binary=binary, api_key=api_key, rules_path=rules_path) if project else None
-        active = None
         try:
-            if slots.locked():
-                message = json.loads(await asyncio.wait_for(reader.readline(), 5))
-                if not isinstance(message, dict):
-                    return
-                reason = 'Слишком много открытых сеансов Codex. Закройте один из них и повторите попытку.'
-                if control:
-                    writer.write(json.dumps({'error': reason}).encode() + b'\n')
-                    await writer.drain()
-                else:
-                    await session.send({'id': message.get('id'), 'error': {'code': -32000, 'message': reason}})
-                return
-            async with slots:
-                while line := await asyncio.wait_for(reader.readline(), 1800):
-                    message = json.loads(line)
-                    if not isinstance(message, dict):
-                        break
-                    if control:
-                        result = await control.handle(message)
-                        writer.write(json.dumps(result).encode() + b'\n')
-                        await writer.drain()
-                        break
-                    if active and not active.done():
-                        if message.get('method') == 'session/cancel':
-                            await session.handle(message)
-                        elif message.get('id') is not None:
-                            await session.send({'id': message['id'], 'error': {'code': -32000, 'message': 'Дождитесь завершения текущего действия.'}})
-                    else:
-                        active = asyncio.create_task(session.handle(message))
+            message = json.loads(await asyncio.wait_for(reader.readline(), 30))
+            if isinstance(message, dict):
+                result = await control.handle(message)
+                writer.write(json.dumps(result).encode() + b'\n')
+                await writer.drain()
         except (ValueError, OSError, asyncio.TimeoutError):
             pass
         finally:
-            if active:
-                active.cancel()
-                await asyncio.gather(active, return_exceptions=True)
-            if session:
-                await session.close()
             writer.close()
             with suppress(OSError):
                 await writer.wait_closed()
@@ -411,9 +237,7 @@ async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=A
         async with server:
             await server.serve_forever()
     finally:
-        if control:
-            await control.close()
-
+        await control.close()
 
 if __name__ == '__main__':
     project = sys.argv[1] if len(sys.argv) > 1 else None

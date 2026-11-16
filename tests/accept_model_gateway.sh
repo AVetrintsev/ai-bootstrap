@@ -10,26 +10,16 @@ model=$2
 config=/etc/ai-bootstrap/model-gateway.json
 work=$(mktemp -d /run/ai-model-accept.XXXXXX)
 marker=ai-qwen-accept-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')
-changed=no
-restore_policy() {
-    install -m 0640 -o root -g ai-models "$work/config.json" "$config.restore"
-    mv -fT "$config.restore" "$config"
-    changed=no
-}
 cleanup() {
     local result=$?
     if [[ $result != 0 && -f $work/qwen.jsonl ]]; then
         install -m 0600 "$work/qwen.jsonl" /var/lib/ai-models/last-acceptance.log
         echo 'Qwen acceptance failed; private diagnostic: /var/lib/ai-models/last-acceptance.log' >&2
     fi
-    if [[ $changed == yes ]]; then
-        restore_policy
-    fi
     ai-sandbox shell "$project" rm -f -- "/tmp/$marker" >/dev/null 2>&1 || true
     rm -rf -- "$work"
 }
 trap cleanup EXIT
-cp -- "$config" "$work/config.json"
 ai-sandbox shell "$project" python3 - "$model" <<'PY'
 import json, os, pathlib, socket, sys, urllib.error, urllib.request
 c=json.loads(pathlib.Path('/root/.config/ai-bootstrap/model-gateway.json').read_text())
@@ -78,28 +68,6 @@ for provider in json.loads(pathlib.Path(sys.argv[2]).read_text())['providers'].v
 print('OK Qwen called the shell tool inside the sandbox')
 PY
 }
-changed=yes
-python3 - "$config" "$project" <<'PY'
-import json,os,pathlib,sys
-p=pathlib.Path(sys.argv[1]); c=json.loads(p.read_text()); project=sys.argv[2]
-policy=dict(c.get('projects',{}).get(project,c['defaults'])); policy['requests_per_day']=0
-c.setdefault('projects',{})[project]=policy
-staged=p.with_suffix('.accept'); staged.write_text(json.dumps(c)); staged.chmod(0o640)
-os.chown(staged,p.stat().st_uid,p.stat().st_gid); os.replace(staged,p)
-PY
-ai-sandbox shell "$project" python3 - "$model" <<'PY'
-import json,os,pathlib,sys,urllib.error,urllib.request
-c=json.loads(pathlib.Path('/root/.config/ai-bootstrap/model-gateway.json').read_text())
-r=urllib.request.Request('http://'+os.environ['AI_GATEWAY_HOST']+':18081/v1/chat/completions',
- data=json.dumps({'model':sys.argv[1],'messages':[{'role':'user','content':'quota check'}]}).encode(),
- headers={'Authorization':'Bearer '+c['api_key'],'Content-Type':'application/json'})
-try: urllib.request.urlopen(r,timeout=10)
-except urllib.error.HTTPError as error:
- assert error.code==429 and json.load(error)['error']['code']=='project_quota_exceeded'
-else: raise AssertionError('Exhausted project quota was accepted')
-print('OK exhausted project quota')
-PY
-restore_policy
 printf 'OK model gateway API acceptance: %s\n' "$project"
 [[ ${3:-} != --api-only ]] || exit 0
 qwen_acceptance

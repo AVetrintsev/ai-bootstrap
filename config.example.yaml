@@ -22,12 +22,11 @@ sandbox:
 #     qwen3.8-flash: {provider: openrouter, model: qwen/qwen3.8-flash}
 #   defaults:
 #     models: [qwen3.8-flash]
-#     requests_per_day: 100
-#     max_output_tokens: 8192
 #   projects: {}
-#   # Здесь можно переопределить всю политику для конкретной песочницы.
+#   # Здесь можно выбрать доступные модели для конкретной песочницы.
+#   # Бюджеты и лимиты расхода задаются только на стороне провайдера.
 #   # projects:
-#   #   example: {models: [qwen3.8-flash], requests_per_day: 20, max_output_tokens: 4096}
+#   #   example: {models: [qwen3.8-flash]}
 
 # Память использует ключ провайдера выбранной модели, только на доверенной стороне VM.
 # Вызовы Graphiti и embeddings тарифицируются провайдером отдельно от подписки Codex.

@@ -77,7 +77,7 @@ class GatewayTests(unittest.TestCase):
                 "key_file": str(self.root / "provider.key"),
             }},
             "models": {"coder": {"provider": "test", "model": "upstream-coder"}},
-            "defaults": {"models": ["coder"], "requests_per_day": 2, "max_output_tokens": 256},
+            "defaults": {"models": ["coder"]},
             "projects": {},
         }))
         self.state = self.root / "state"
@@ -113,10 +113,16 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(authorization, "Bearer test-provider-secret")
         self.assertEqual(upstream["model"], "upstream-coder")
         self.assertEqual(upstream["tools"], [tool])
-        self.assertEqual(upstream["max_tokens"], 256)
+        self.assertEqual(upstream["max_tokens"], 1024)
         self.assertNotIn("test-provider-secret", json.dumps(self.client))
 
-    def test_project_quota_survives_restart_and_does_not_charge_denied_models(self):
+    def test_old_budget_configuration_and_usage_do_not_limit_requests_after_restart(self):
+        settings = json.loads(self.config.read_text())
+        settings["defaults"].update(requests_per_day=0, max_output_tokens=1)
+        self.config.write_text(json.dumps(settings))
+        with model_gateway.database(self.state) as database:
+            database.execute('CREATE TABLE usage (project TEXT, day TEXT, requests INTEGER)')
+            database.execute("INSERT INTO usage VALUES ('alpha', '2026-11-16', 999999)")
         request = {"model": "coder", "messages": [{"role": "user", "content": "hello"}]}
         status, _ = self.request(dict(request, model="forbidden"))
         self.assertEqual(status, 403)
@@ -126,28 +132,30 @@ class GatewayTests(unittest.TestCase):
         self.gateway = model_gateway.make_server(self.config, self.state, ("127.0.0.1", 0))
         self.start(self.gateway)
         status, body = self.request(request)
-        self.assertEqual(status, 429, body)
-        self.assertEqual(json.loads(body)["error"]["code"], "project_quota_exceeded")
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("max_tokens", Provider.requests[-1][2])
         beta = model_gateway.provision(self.config, self.state, "beta")
         self.assertEqual(self.request(request, token=beta["api_key"])[0], 200)
-        self.assertEqual(len(Provider.requests), 3)
+        self.assertEqual(len(Provider.requests), 4)
 
-    def test_streaming_tool_calls_and_output_limits_cannot_be_overridden(self):
+    def test_streaming_preserves_provider_options_and_agent_output_limit(self):
         status, body = self.request({"model": "coder", "messages": [], "stream": True,
-                                     "max_tokens": 128, "max_completion_tokens": 999999, "n": 5})
+                                     "max_completion_tokens": 999999, "n": 5,
+                                     "reasoning": {"effort": "high"}})
         self.assertEqual(status, 200, body)
         self.assertEqual(self.content_type, "text/event-stream")
         self.assertIn(b'"tool_calls"', body)
         self.assertIn(b'data: [DONE]', body)
         upstream = Provider.requests[0][2]
-        self.assertEqual(upstream["n"], 1)
-        self.assertEqual(upstream["max_tokens"], 128)
-        self.assertNotIn("max_completion_tokens", upstream)
+        self.assertEqual(upstream["n"], 5)
+        self.assertEqual(upstream["max_completion_tokens"], 999999)
+        self.assertEqual(upstream["reasoning"], {"effort": "high"})
+        self.assertNotIn("max_tokens", upstream)
 
     def test_project_can_only_discover_and_call_its_allowed_models(self):
         settings = json.loads(self.config.read_text())
         settings["models"]["other"] = {"provider": "test", "model": "other-upstream"}
-        settings["projects"]["beta"] = {"models": ["other"], "requests_per_day": 1, "max_output_tokens": 64}
+        settings["projects"]["beta"] = {"models": ["other"]}
         self.config.write_text(json.dumps(settings))
         beta = model_gateway.provision(self.config, self.state, "beta")
         status, body = self.request(path="/v1/models", token=beta["api_key"])
@@ -159,14 +167,15 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.request(path="/config")[0], 404)
         self.assertEqual(self.request({"model": "other", "messages": []})[0], 403)
 
-    def test_provider_errors_do_not_reveal_credentials_and_failed_attempts_use_quota(self):
+    def test_provider_errors_do_not_reveal_credentials_or_enable_a_local_quota(self):
         Provider.fail = True
         request = {"model": "coder", "messages": []}
-        for _ in range(2):
+        for _ in range(3):
             status, body = self.request(request)
             self.assertEqual(status, 403)
             self.assertNotIn(b"test-provider-secret", body)
-        self.assertEqual(self.request(request)[0], 429)
+        Provider.fail = False
+        self.assertEqual(self.request(request)[0], 200)
 
     def test_rejects_insecure_provider_configuration_before_serving(self):
         settings = json.loads(self.config.read_text())
@@ -175,12 +184,12 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "HTTPS"):
             model_gateway.make_server(self.config, self.state, ("127.0.0.1", 0))
 
-    def test_concurrent_requests_cannot_overrun_the_project_quota(self):
+    def test_concurrent_requests_are_not_subject_to_a_local_budget(self):
         request = {"model": "coder", "messages": []}
         with ThreadPoolExecutor(max_workers=6) as pool:
             results = list(pool.map(lambda _: self.request(request)[0], range(6)))
-        self.assertEqual(sorted(results), [200, 200, 429, 429, 429, 429])
-        self.assertEqual(len(Provider.requests), 2)
+        self.assertEqual(results, [200] * 6)
+        self.assertEqual(len(Provider.requests), 6)
 
     def test_key_rotation_takes_effect_without_changing_the_sandbox_key(self):
         request = {"model": "coder", "messages": []}

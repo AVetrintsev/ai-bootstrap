@@ -158,32 +158,21 @@ class GitHubProjectsTest(unittest.TestCase):
         self.assertEqual(sandboxes, {"gh-7"})
         self.assertEqual(len(projects.list()["projects"]), 1)
 
-    def test_project_waits_for_index_and_retry_keeps_its_sandbox(self):
-        indexing = Event()
-        finish = Event()
-        self.addCleanup(finish.set)
+    def test_project_creation_does_not_wait_for_optional_code_index(self):
         sandboxes = set()
-        fail_index = True
+        actions = []
 
         def sandbox(action, project, repository=None):
+            actions.append(action)
             if action == 'create':
                 sandboxes.add(project)
             if action == 'tools':
-                indexing.set()
-                if not finish.wait(3):
-                    raise ProjectError('index timed out')
-                if fail_index:
-                    raise ProjectError('index failed')
+                raise ProjectError('index unavailable')
 
         projects = self.open_portal(sandbox)
         projects.connect()
         projects.add(7)
-        self.assertTrue(indexing.wait(1))
-        self.assertEqual(projects.list()['projects'][0]['state'], 'creating')
-        finish.set()
-        self.wait_for(projects, {7: 'failed'})
-        fail_index = False
-        projects.add(7)
         self.wait_for(projects, {7: 'ready'})
+        self.assertNotIn('tools', actions)
         self.assertEqual(sandboxes, {'gh-7'})
         self.assertEqual(len(projects.list()['projects']), 1)
