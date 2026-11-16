@@ -86,6 +86,9 @@ class ProjectAdapter:
                        'TOKIO_WORKER_THREADS': '2', 'RAYON_NUM_THREADS': '2'}
         if self.profile == 'api':
             environment['OPENAI_API_KEY'] = self.api_key.read_text().strip()
+            # An env key alone does not satisfy upstream's account/read preflight.
+            # The trusted adapter imports it into Codex's ephemeral auth store.
+            environment['DEFAULT_AUTH_REQUEST'] = '{"methodId":"api-key"}'
         self.process = await asyncio.create_subprocess_exec(self.adapter,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
             cwd=self.home, env=environment, limit=MAX_LINE, start_new_session=True)

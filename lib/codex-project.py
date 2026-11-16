@@ -10,13 +10,16 @@ root = Path('/var/lib/ai-codex')
 (root / 'auth' / 'auth.lock').touch(mode=0o600, exist_ok=True)
 for profile in ('chatgpt', 'api'):
     home = root / 'projects' / project / profile
+    credentials_store = 'file' if profile == 'chatgpt' else 'ephemeral'
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     (home / 'environments.toml').write_text(
         'default = "project"\ninclude_local = false\n\n[[environments]]\nid = "project"\n'
         'program = "/usr/bin/socat"\nargs = ["STDIO", "UNIX-CONNECT:/run/ai-codex-exec/' + project + '.sock"]\n'
         'initialize_timeout_sec = 5\n')
     (home / 'config.toml').write_text(
-        'cli_auth_credentials_store = "file"\napproval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
+        f'cli_auth_credentials_store = "{credentials_store}"\n'
+        f'forced_login_method = "{profile}"\n'
+        'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n'
         '[features]\nhooks = false\n'
         '[mcp_servers.serena]\ncommand = "/opt/ai-serena/bin/serena"\n'
         'args = ["start-mcp-server", "--project", ".", "--context", "ide", "--agent-interface", "tools", '
