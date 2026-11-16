@@ -420,7 +420,7 @@ configure_canvas() {
 }
 
 configure_codex() {
-    ensure_packages socat
+    ensure_packages socat nodejs npm
     service_account ai-codex /var/lib/ai-codex
     install -d -m 0700 -o ai-codex -g ai-codex /var/lib/ai-codex /var/lib/ai-codex/auth
     if [[ ! -x /opt/ai-codex/bin/codex-code-mode-host || ! -x /opt/ai-codex/bin/codex || $(/opt/ai-codex/bin/codex --version) != "codex-cli $CODEX_VERSION" ]]; then
@@ -435,8 +435,14 @@ configure_codex() {
         if [[ -d /opt/ai-codex ]]; then mv /opt/ai-codex /opt/ai-codex.previous; fi
         mv "$assets/codex-package" /opt/ai-codex
     fi
+    if [[ ! -x /opt/ai-codex-acp/bin/codex-acp || $(cat /opt/ai-codex-acp/version 2>/dev/null) != "$CODEX_ACP_VERSION" ]]; then
+        install -d -m 0755 /opt/ai-codex-acp
+        quiet 'could not install pinned Codex ACP' npm install --global --prefix /opt/ai-codex-acp \
+            --ignore-scripts --omit=optional --no-audit --no-fund "@agentclientprotocol/codex-acp@$CODEX_ACP_VERSION"
+        printf '%s\n' "$CODEX_ACP_VERSION" > /opt/ai-codex-acp/version
+    fi
     local file unit
-    for file in codex_service.py codex-project.py codex-executor.py codex-client; do
+    for file in codex_service.py codex_acp.py codex-project.py codex-executor.py codex-client; do
         publish "$release/lib/$file" "$libexec/$file" 644
     done
     publish "$release/lib/codex-api-key" /usr/local/sbin/ai-codex-api-key 755
