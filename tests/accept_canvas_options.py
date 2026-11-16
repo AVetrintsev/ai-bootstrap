@@ -89,6 +89,13 @@ def check(page, profile_id, name):
         picker.wait_for(timeout=60000)
         model = page.get_by_test_id("chat-input-llm-model")
         model.wait_for(timeout=30000)
+        page.set_viewport_size({"width": 390, "height": 850})
+        picker.wait_for()
+        assert picker.evaluate(
+            "el => { const bounds = el.getBoundingClientRect(); "
+            "return bounds.width > 0 && bounds.left >= 0 && bounds.right <= innerWidth; }"
+        ), name
+        page.set_viewport_size({"width": 1440, "height": 1000})
         prompt(page, endpoint, editor, "READY")
         print(f"{name}: controls appeared before the first message and first response received", flush=True)
         info = json.loads(api(page, endpoint))

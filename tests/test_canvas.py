@@ -129,8 +129,11 @@ class CanvasTest(unittest.IsolatedAsyncioTestCase):
             async with self.client.get(url, cookies={"ai_session": self.session}) as response:
                 self.assertEqual(response.status, 200)
                 self.assertEqual((await response.json())["path"], expected)
+        async with self.client.get(url.with_query(initialize_acp="false"),
+                                   cookies={"ai_session": self.session}) as response:
+            self.assertEqual((await response.json())["path"], path)
         self.assertEqual(calls, [(path + "/agent_options", "private-project-key")] * 2
-                         + [(path, "private-project-key")])
+                         + [(path, "private-project-key")] * 2)
 
     async def test_expiry_closes_idle_event_stream_without_waiting_for_an_agent_event(self):
         finished = asyncio.Event()
