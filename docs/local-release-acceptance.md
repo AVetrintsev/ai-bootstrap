@@ -24,6 +24,16 @@
 не принимается Subiquity. Проверять конфигурацию следует схемой версии,
 которая находится на выбранном ISO, а не только общим YAML-парсером.
 
+На отдельной VM приёмки жизненный цикл владельца проверяется через настоящий
+портал. Сценарий **сбрасывает владельца**; запускать его до остальных браузерных
+проверок. Он сохраняет новые тестовые cookie и TOTP только в закрытом `STATE_DIR`.
+Истечение суток, месяца и окна ошибок моделируется изменением сроков в тестовой
+базе, без изменения часов VM. Решения о доступе принимает установленный портал.
+
+```bash
+python3 tests/accept_portal_lifecycle.py http://localhost:8080 /root/acceptance-owner --reset-owner
+```
+
 ## Два проекта и агенты
 
 Из портала один раз подключить GitHub App и добавить два разрешённых
@@ -48,6 +58,7 @@ for project in "$PROJECT_A" "$PROJECT_B"; do
     done
 done
 python3 tests/accept_codex_isolation.py "$PROJECT_A"
+"$PYTHON" tests/accept_canvas_revocation.py "$PROJECT_A" "$CHROMIUM"
 python3 tests/accept_project_memory.py "$PROJECT_A" "$PROJECT_B"
 "$PYTHON" tests/accept_shared_memory.py "$PROJECT_A" "$PROJECT_B" "$CHROMIUM" ./install.sh
 "$PYTHON" tests/accept_shared_rules.py "$PROJECT_A" "$PROJECT_B" "$CHROMIUM" ./install.sh
@@ -69,6 +80,15 @@ python3 tests/accept_project_memory.py "$PROJECT_A" "$PROJECT_B"
 метаданных облака и неразрешённых внутренних адресов. Во время остановки
 mihomo новые исходящие подключения должны отказывать; восстановление
 службы обязательно и при ошибке проверки.
+
+Сетевой сценарий можно направить на эти же два проекта. Он также добавляет
+контрольный файл и пакет `hello` для проверки сохранности после переустановки.
+
+```bash
+ACCEPT_PROJECT_A="$PROJECT_A" ACCEPT_PROJECT_B="$PROJECT_B" bash tests/accept_sandbox.sh before
+# Повторная установка проверяемого релиза.
+ACCEPT_PROJECT_A="$PROJECT_A" ACCEPT_PROJECT_B="$PROJECT_B" bash tests/accept_sandbox.sh after
+```
 
 До повторной установки сохранить контрольные значения рабочих файлов,
 пакетов, истории, индексов, памяти, сессий и секретов в закрытом каталоге VM.

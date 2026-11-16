@@ -2,8 +2,12 @@
 set -Eeuo pipefail
 
 [[ $EUID == 0 ]] || { echo 'Run on the target VM as root' >&2; exit 1; }
-first=accept-a
-second=accept-b
+first=${ACCEPT_PROJECT_A:-accept-a}
+second=${ACCEPT_PROJECT_B:-accept-b}
+[[ $first != "$second" && $first =~ ^[a-z][a-z0-9-]{0,23}$ && $second =~ ^[a-z][a-z0-9-]{0,23}$ ]] || {
+    echo 'Expected two distinct sandbox names' >&2
+    exit 1
+}
 marker=/root/ai-bootstrap-acceptance
 read -r enabled min_uid max_uid < /etc/ai-bootstrap/sandbox-settings
 [[ $enabled == yes ]]
