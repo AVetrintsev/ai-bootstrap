@@ -17,10 +17,10 @@ begin_public_https() {
     keep_local=no
     keep_public=no
     nginx_was_active=no
-    if grep -qs 'listen 127.0.0.1:8080' "$nginx_config"; then
+    if installed_local_portal; then
         keep_local=yes
     fi
-    if grep -qFx "# ai-bootstrap public portal $portal_domain" "$nginx_config"; then
+    if installed_public_portal "$portal_domain"; then
         keep_public=yes
     fi
     if systemctl is-active --quiet nginx.service; then
@@ -42,19 +42,27 @@ begin_public_https() {
 }
 
 restore_portal() {
-    if ! cp -p -- "$work/firewall-before-https.nft" "$etc/firewall.nft" ||
+    local restored=yes
+    if ! publish "$work/firewall-before-https.nft" "$etc/firewall.nft" 600 ||
         ! systemctl reload "$firewall_unit" >/dev/null 2>&1; then
         printf 'ERROR install/rollback: could not restore the previous firewall\n' >&2
+        restored=no
     fi
-    if ! cp -p -- "$work/nginx-before-https.conf" "$nginx_config"; then
+    if ! publish "$work/nginx-before-https.conf" "$nginx_config" 644; then
         printf 'ERROR install/rollback: could not restore the previous nginx configuration\n' >&2
+        restored=no
     elif [[ $nginx_was_active == yes ]]; then
-        systemctl restart nginx.service >/dev/null 2>&1 ||
+        if ! systemctl restart nginx.service >/dev/null 2>&1; then
             printf 'ERROR install/rollback: could not restart nginx with its previous configuration\n' >&2
+            restored=no
+        fi
     else
-        systemctl stop nginx.service >/dev/null 2>&1 ||
+        if ! systemctl stop nginx.service >/dev/null 2>&1; then
             printf 'ERROR install/rollback: could not stop nginx\n' >&2
+            restored=no
+        fi
     fi
+    [[ $restored == yes ]]
 }
 
 acme() {
@@ -83,21 +91,26 @@ globalping() {
     reason=$(python3 -I "$release/lib/public-portal.py" probe \
         "$portal_domain" "$portal_ipv4" "$probe_path" "$body" 2>&1) || fail "$reason"
     rm -f -- "$probe_dir/body"
+    old_probe_path=$probe_path
+    unset probe_path
+    render_nginx "$keep_local" probe > "$work/nginx-verified.conf"
+    apply_nginx "$work/nginx-verified.conf"
 }
 
 configure_public_https() {
-    local old_probe=$probe_path status path
-    unset probe_path
+    local status path listeners
     render_nginx no public > "$work/nginx-public.conf"
     apply_nginx "$work/nginx-public.conf"
 
-    for path in / /api/status /api/test-stream /projects /canvas "$old_probe"; do
+    for path in / /api/status /api/test-stream /projects /canvas "$old_probe_path"; do
         status=$(curl -q --noproxy '*' -4 --silent --max-time 10 --output /dev/null \
             --resolve "$portal_domain:443:127.0.0.1" --write-out '%{http_code}' "https://$portal_domain$path") ||
             fail 'could not verify the installed HTTPS listener and certificate'
         [[ $status == 404 ]] || fail 'expected a 404 for anonymous access and the expired HTTPS probe'
     done
-    [[ -z $(ss -Hltnp 'sport = :8080' | awk '/"nginx"/ {print $4}') ]] ||
+    listeners=$(ss -Hltnp 'sport = :8080' | awk '/"nginx"/ {print $4}') ||
+        fail 'could not check the local HTTP port 8080'
+    [[ -z $listeners ]] ||
         fail 'nginx still listens on the local HTTP port 8080'
 
     install -d -m 0755 /etc/letsencrypt/renewal-hooks/deploy

@@ -1,5 +1,17 @@
 #!/usr/bin/env bash
 
+installed_local_portal() {
+    grep -qs 'listen 127.0.0.1:8080' "$nginx_config"
+}
+
+installed_public_portal() {
+    if [[ $# == 0 ]]; then
+        grep -qs '^# ai-bootstrap public portal ' "$nginx_config"
+    else
+        grep -qFxs "# ai-bootstrap public portal $1" "$nginx_config"
+    fi
+}
+
 local_servers() {
     cat <<'EOF'
     server {
@@ -29,6 +41,9 @@ public_http_servers() {
             default_type text/plain;
             try_files \$uri =404;
         }
+EOF
+    probe_location
+    cat <<EOF
 
         location / {
             return 308 https://$portal_domain\$request_uri;
@@ -51,6 +66,16 @@ public_tls_servers() {
         ssl_certificate $certificate/fullchain.pem;
         ssl_certificate_key $certificate/privkey.pem;
 EOF
+    probe_location
+    if [[ $serve_portal == yes ]]; then
+        cat "$release/lib/nginx-portal-routes.conf"
+    else
+        printf '        location / { return 404; }\n'
+    fi
+    printf '    }\n'
+}
+
+probe_location() {
     if [[ -n ${probe_path:-} ]]; then
         cat <<EOF
         location = $probe_path {
@@ -60,12 +85,6 @@ EOF
         }
 EOF
     fi
-    if [[ $serve_portal == yes ]]; then
-        cat "$release/lib/nginx-portal-routes.conf"
-    else
-        printf '        location / { return 404; }\n'
-    fi
-    printf '    }\n'
 }
 
 render_nginx() {

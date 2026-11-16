@@ -55,15 +55,19 @@ source "$release/lib/nginx-portal.sh"
 source "$release/lib/public-portal.sh"
 
 cleanup() {
+    local preserve_work=no
     if [[ -n ${probe_dir:-} ]]; then
         if ! rm -f -- "$probe_dir/body" || ! rmdir -- "$probe_dir"; then
             printf 'ERROR install/cleanup: could not remove the temporary HTTPS probe file\n' >&2
         fi
     fi
     if [[ ${restore_public_portal:-no} == yes ]]; then
-        restore_portal
+        if ! restore_portal; then
+            preserve_work=yes
+            printf 'ERROR install/rollback: preserved backups in %s\n' "$work" >&2
+        fi
     fi
-    rm -rf -- "$work"
+    if [[ $preserve_work == no ]]; then rm -rf -- "$work"; fi
     if [[ -n ${assets:-} ]]; then rm -rf -- "$assets"; fi
 }
 
@@ -190,9 +194,12 @@ publish() {
     if cmp -s -- "$source" "$target" && [[ $(stat -c '%a:%U:%G' "$target") == "$mode:root:$group" ]]; then
         return
     fi
-    staged=$(mktemp "${target}.XXXXXX")
-    install -o root -g "$group" -m "$mode" -- "$source" "$staged"
-    mv -fT -- "$staged" "$target"
+    staged=$(mktemp "${target}.XXXXXX") || return 1
+    if ! install -o root -g "$group" -m "$mode" -- "$source" "$staged" ||
+       ! mv -fT -- "$staged" "$target"; then
+        rm -f -- "$staged"
+        return 1
+    fi
 }
 
 validate_network() {
@@ -218,7 +225,7 @@ EOF
     fi
     [[ $(grep '^port ' "$work/ssh-effective") == 'port 22' ]] ||
         fail 'expected the SSH configuration to use only TCP port 22'
-    if [[ $portal_transport == local-http ]] || grep -qs 'listen 127.0.0.1:8080' "$nginx_config"; then
+    if [[ $portal_transport == local-http ]] || installed_local_portal; then
         grep -Eq '^allowtcpforwarding (yes|all|local)$' "$work/ssh-effective" &&
             grep -qx 'disableforwarding no' "$work/ssh-effective" &&
             grep -Eq '^permitopen (.* )?(any|127\.0\.0\.1:8080|127\.0\.0\.1:\*|\*:8080|\*:\*)( |$)' "$work/ssh-effective" ||
@@ -242,7 +249,7 @@ configure_ssh() {
 
 configure_firewall() {
     local firewall=$work/firewall.nft
-    if [[ $portal_transport == https ]] && grep -qs '^# ai-bootstrap public portal ' "$nginx_config"; then
+    if [[ $portal_transport == https ]] && installed_public_portal; then
         firewall=$work/firewall-public.nft
     fi
     publish "$firewall" "$etc/firewall.nft" 600
@@ -544,7 +551,7 @@ configure_portal() {
 
 portal_nginx_package() {
     local unit=nginx.service dropin=/etc/systemd/system/nginx.service.d
-    local unit_config=$release/lib/nginx-local-http.service.conf
+    local unit_config=$release/lib/nginx-portal.service.conf
     # Install the override before apt can start the vendor service with the default site.
     install -d -m 0755 "$dropin"
     if [[ ! -e $nginx_config ]]; then
@@ -607,6 +614,11 @@ run_step configure_mihomo
 run_step verify_egress
 if [[ $portal_transport == https ]]; then
     run_step public_dns
+    run_step portal_nginx_package
+    run_step certbot_packages
+    run_step begin_public_https
+    run_step acme
+    run_step globalping
 fi
 if [[ $sandbox_enabled == yes ]]; then
     run_step sandbox_packages
@@ -617,8 +629,8 @@ run_step configure_model_gateway
 run_step configure_memory
 run_step portal_packages
 run_step configure_portal
-run_step portal_nginx_package
 if [[ $portal_transport == local-http ]]; then
+    run_step portal_nginx_package
     run_step configure_local_http
     run_step verify_local_http
     skip_step public_dns 'local-http needs no public DNS'
@@ -629,10 +641,6 @@ if [[ $portal_transport == local-http ]]; then
         'Open the owner activation URL in your browser. If already activated, use http://localhost:8080.'
     portal_url=$local_portal_url
 else
-    run_step certbot_packages
-    run_step begin_public_https
-    run_step acme
-    run_step globalping
     run_step configure_public_https
     portal_url=https://$portal_domain
     printf 'Portal: %s\n' "$portal_url"

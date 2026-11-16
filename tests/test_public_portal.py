@@ -34,7 +34,7 @@ class PublicPortalTests(unittest.TestCase):
         complete = {"status": "finished", "resolvedAddress": IPV4, "tls": {"authorized": True},
                     "statusCode": 200, "truncated": False, "rawBody": BODY}
         fetch.side_effect = [{"id": "probe-id"}, {"status": "finished", "results": [{"result": complete}]}]
-        public_portal.verify_https(DOMAIN, IPV4, PATH, BODY)
+        public_portal.verify_web(DOMAIN, IPV4, PATH, BODY, "HTTPS", 443)
         request = json.loads(fetch.call_args_list[0].args[-1])
         self.assertEqual(request["target"], DOMAIN)
         self.assertEqual(request["measurementOptions"], {
@@ -42,6 +42,7 @@ class PublicPortalTests(unittest.TestCase):
         })
         for overrides, message in (
             ({"resolvedAddress": "8.8.8.8"}, "public DNS"),
+            ({"status": "failed", "resolvedAddress": "8.8.8.8"}, "public DNS"),
             ({"tls": {"authorized": False}}, "public TLS"),
             ({"statusCode": 302}, "public inbound HTTPS"),
             ({"rawBody": BODY + "\n"}, "public inbound HTTPS"),
@@ -54,9 +55,18 @@ class PublicPortalTests(unittest.TestCase):
                     {"status": "finished", "results": [{"result": {**complete, **overrides}}]},
                 ]
                 with self.assertRaisesRegex(SystemExit, message):
-                    public_portal.verify_https(DOMAIN, IPV4, PATH, BODY)
+                    public_portal.verify_web(DOMAIN, IPV4, PATH, BODY, "HTTPS", 443)
+
+    @patch.object(public_portal, "fetch_json")
+    def test_external_probe_also_checks_http_80_without_tls(self, fetch):
+        complete = {"status": "finished", "resolvedAddress": IPV4, "statusCode": 200, "rawBody": BODY}
+        fetch.side_effect = [{"id": "probe-id"}, {"status": "finished", "results": [{"result": complete}]}]
+        public_portal.verify_web(DOMAIN, IPV4, PATH, BODY, "HTTP", 80)
+        request = json.loads(fetch.call_args_list[0].args[-1])
+        self.assertEqual(request["measurementOptions"]["protocol"], "HTTP")
+        self.assertEqual(request["measurementOptions"]["port"], 80)
 
     @patch.object(public_portal, "fetch_json", side_effect=subprocess.CalledProcessError(28, "curl"))
     def test_globalping_api_failure_is_reported_separately(self, fetch):
         with self.assertRaisesRegex(SystemExit, "Globalping unavailable"):
-            public_portal.verify_https(DOMAIN, IPV4, PATH, BODY)
+            public_portal.verify_web(DOMAIN, IPV4, PATH, BODY, "HTTPS", 443)

@@ -41,13 +41,13 @@ def verify_dns(domain, expected_ipv4):
         raise SystemExit(f"unexpected public DNS AAAA for {domain}; remove it for this IPv4 portal")
 
 
-def globalping_result(domain, path):
+def globalping_result(domain, path, protocol, port):
     measurement = {
         "type": "http",
         "target": domain,
         "limit": 1,
         "measurementOptions": {
-            "protocol": "HTTPS", "port": 443, "ipVersion": 4,
+            "protocol": protocol, "port": port, "ipVersion": 4,
             "request": {"method": "GET", "path": path},
         },
     }
@@ -70,9 +70,12 @@ def globalping_result(domain, path):
     raise SystemExit(unavailable)
 
 
-def verify_https(domain, expected_ipv4, path, body):
-    result = globalping_result(domain, path)
+def verify_web(domain, expected_ipv4, path, body, protocol, port):
+    result = globalping_result(domain, path, protocol, port)
     status = result.get("status")
+    address = result.get("resolvedAddress")
+    if (status == "finished" or address is not None) and address != expected_ipv4:
+        raise SystemExit(f"public DNS from Globalping: expected {expected_ipv4}, got {address}")
     if status != "finished":
         source = result.get("failureSource")
         detail = result.get("rawOutput", "").lower()
@@ -80,16 +83,13 @@ def verify_https(domain, expected_ipv4, path, body):
             raise SystemExit("Globalping external probe unavailable")
         if source == "resolver" or re.search(r"enotfound|eai_again|getaddrinfo", detail):
             raise SystemExit("public DNS lookup failed at the Globalping probe")
-        if re.search(r"certificate|tls|ssl|self.signed", detail):
+        if protocol == "HTTPS" and re.search(r"certificate|tls|ssl|self.signed", detail):
             raise SystemExit("public TLS handshake or certificate validation failed")
-        raise SystemExit("public inbound TCP 443 or HTTPS response failed at the Globalping probe")
-    address = result.get("resolvedAddress")
-    if address != expected_ipv4:
-        raise SystemExit(f"public DNS from Globalping: expected {expected_ipv4}, got {address}")
-    if (result.get("tls") or {}).get("authorized") is not True:
+        raise SystemExit(f"public inbound TCP {port} or {protocol} response failed at the Globalping probe")
+    if protocol == "HTTPS" and (result.get("tls") or {}).get("authorized") is not True:
         raise SystemExit("public TLS certificate was not trusted by the Globalping probe")
     if result.get("statusCode") != 200 or result.get("truncated") or result.get("rawBody") != body:
-        raise SystemExit("public inbound HTTPS did not return the expected status 200 and probe body")
+        raise SystemExit(f"public inbound {protocol} did not return the expected status 200 and probe body")
 
 
 if __name__ == "__main__":
@@ -106,4 +106,5 @@ if __name__ == "__main__":
     if args.command == "dns":
         verify_dns(args.domain, args.expected_ipv4)
     else:
-        verify_https(args.domain, args.expected_ipv4, args.path, args.body)
+        verify_web(args.domain, args.expected_ipv4, args.path, args.body, "HTTP", 80)
+        verify_web(args.domain, args.expected_ipv4, args.path, args.body, "HTTPS", 443)
