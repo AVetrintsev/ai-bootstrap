@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -9,12 +10,18 @@ import time
 from urllib.parse import urlsplit
 import uuid
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as BrowserTimeout, sync_playwright
 
 
-if os.geteuid() != 0 or len(sys.argv) != 4:
-    sys.exit("Usage: sudo PYTHON tests/accept_canvas_options.py PROJECT CHROMIUM ORIGIN")
-project, chromium, origin = sys.argv[1:]
+profiles_by_agent = {"codex": "codex-subscription", "qwen": "qwen-code"}
+if (
+    os.geteuid() != 0
+    or len(sys.argv) not in (4, 5)
+    or (len(sys.argv) == 5 and sys.argv[4] not in profiles_by_agent)
+):
+    sys.exit("Usage: sudo PYTHON tests/accept_canvas_options.py PROJECT CHROMIUM ORIGIN [codex|qwen]")
+project, chromium, origin = sys.argv[1:4]
+profile_names = [profiles_by_agent[sys.argv[4]]] if len(sys.argv) == 5 else profiles_by_agent.values()
 origin = origin.rstrip("/")
 address = urlsplit(origin)
 token = secrets.token_urlsafe(32)
@@ -44,6 +51,27 @@ def api(page, path, method="GET", data=None):
     return result["body"]
 
 
+def wait_for_value(page, endpoint, field, value):
+    deadline = time.monotonic() + 25
+    while time.monotonic() < deadline:
+        if json.loads(api(page, endpoint))[field] == value:
+            return
+        page.wait_for_timeout(350)
+    raise AssertionError(f"Conversation did not apply {field}")
+
+
+def prompt(page, endpoint, editor, word):
+    editor.fill(f"Reply exactly {word}. Do not use tools.")
+    editor.press("Enter")
+    try:
+        reply = re.compile(rf"^{re.escape(word)}[.!]?$", re.IGNORECASE)
+        page.get_by_text(reply).last.wait_for(timeout=150000)
+    except BrowserTimeout:
+        events = json.loads(api(page, f"{endpoint}/events/search?limit=20"))["items"]
+        event_types = [(event.get("kind"), event.get("source")) for event in events]
+        raise AssertionError(f"{word}: no expected reply. Events: {event_types}") from None
+
+
 def check(page, profile_id, name):
     identifier = str(uuid.uuid4())
     endpoint = f"conversations/{identifier}"
@@ -57,29 +85,33 @@ def check(page, profile_id, name):
     try:
         page.goto(f"{origin}/conversations/{identifier}?backend={project}")
         editor = page.get_by_test_id("chat-input")
-        editor.fill("Reply exactly READY. Do not use tools.")
-        editor.press("Enter")
-        page.get_by_text("READY", exact=True).last.wait_for(timeout=150000)
+        prompt(page, endpoint, editor, "READY")
+        print(f"{name}: first response received", flush=True)
         picker = page.get_by_test_id("ai-bootstrap-reasoning")
         picker.wait_for(timeout=30000)
         model = page.get_by_test_id("chat-input-llm-model")
         model.wait_for(timeout=30000)
         info = json.loads(api(page, endpoint))
         assert info["available_models"], name
+        original_model = info["current_model_id"]
+        offered = [item["model_id"] for item in info["available_models"]]
+        others = [value for value in offered if value != original_model]
+        if others:
+            choices = (others[0], original_model) if original_model in offered else (others[0],)
+            for value in choices:
+                model.click()
+                page.get_by_test_id(f"chat-input-acp-model-option-{value}").click()
+                wait_for_value(page, endpoint, "current_model_id", value)
+            info = json.loads(api(page, endpoint))
         effort = next(option["value"] for option in info["available_efforts"]
                       if option["value"] in ("low", "medium", "high") and option["value"] != info["current_effort"])
         picker.select_option(effort)
-        deadline = time.monotonic() + 25
-        while time.monotonic() < deadline:
-            if json.loads(api(page, endpoint))["current_effort"] == effort:
-                break
-            page.wait_for_timeout(350)
-        else:
-            raise AssertionError(f"{name}: thinking level was not applied")
+        wait_for_value(page, endpoint, "current_effort", effort)
         page.reload()
         picker.wait_for(timeout=30000)
         assert picker.input_value() == effort, name
-        print(f"{name}: native model picker and reasoning change after reload verified", flush=True)
+        prompt(page, endpoint, editor, "APPLIED")
+        print(f"{name}: model catalog, reasoning change after reload and subsequent reply verified", flush=True)
     finally:
         api(page, endpoint + "/pause", "POST")
         api(page, endpoint, "DELETE")
@@ -98,7 +130,7 @@ try:
         page.goto(f"{origin}/canvas/open/{project}")
         page.get_by_test_id("chat-input").wait_for()
         profiles = json.loads(api(page, "agent-profiles"))["profiles"]
-        for name in ("codex-subscription", "qwen-code"):
+        for name in profile_names:
             check(page, next(profile["id"] for profile in profiles if profile["name"] == name), name)
 finally:
     with sqlite3.connect(database) as db:
