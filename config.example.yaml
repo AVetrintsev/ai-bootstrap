@@ -4,7 +4,9 @@ ssh:
 
 portal:
   transport: local-http
-  # Для https задайте domain и expected_ipv4.
+  # Для публичного портала выберите https и укажите домен и входящий IPv4.
+  # domain: portal.example.org
+  # expected_ipv4: PUBLIC_IPV4
 
 sandbox:
   memory_percent: 80  # Общий пул для всех песочниц, процент всей RAM VM.
