@@ -79,6 +79,9 @@ sudo runuser -u ai-portal -- /usr/bin/python3 -I /usr/local/libexec/ai-bootstrap
 python3 -m unittest discover -s tests
 ```
 
+Полная приёмка чистого локального релиза с двумя проектами и повторной
+установкой описана в [docs/local-release-acceptance.md](docs/local-release-acceptance.md).
+
 ## Постоянные песочницы проектов
 
 Добавьте в рабочий YAML раздел `sandbox` (для начала достаточно `sandbox: {internal_tcp: []}`) и повторите установку. После этого на VM владелец создаёт песочницу и открывает её терминал:
