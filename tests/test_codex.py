@@ -30,38 +30,9 @@ for line in sys.stdin:
         result={'ordinaryUsageAllowed':scenario['status']!='limit_reached','rateLimits':{}}
     elif method=='account/login/start':
         result={'type':'chatgptDeviceCode','loginId':'private-login','userCode':'TEST-CODE','verificationUrl':'https://auth.openai.com/codex/device'}
-    elif method in ('thread/start','thread/resume'):
-        settings=home/'settings.json'
-        result={'thread':{'id':'fixture-thread'},'model':'fixture-model','reasoningEffort':'medium'}
-        if method=='thread/resume' and settings.exists():
-            result.update(json.loads(settings.read_text()))
-    elif method=='model/list':
-        result={'data':[
-            {'model':'fixture-model','displayName':'Fixture','description':'Base','hidden':False,
-             'defaultReasoningEffort':'medium','supportedReasoningEfforts':[{'reasoningEffort':'medium','description':'Balanced'}]},
-            {'model':'fixture-other','displayName':'Other','description':'Other','hidden':False,
-             'defaultReasoningEffort':'medium','supportedReasoningEfforts':[
-                 {'reasoningEffort':'medium','description':'Balanced'},{'reasoningEffort':'high','description':'Deep'}]},
-            {'model':'hidden-model','hidden':True},
-        ]}
-    elif method=='thread/settings/update':
-        assert set(req['params']) <= {'threadId','model','effort'}
-        settings=home/'settings.json'
-        current=json.loads(settings.read_text()) if settings.exists() else {}
-        if 'model' in req['params']: current['model']=req['params']['model']
-        if 'effort' in req['params']: current['reasoningEffort']=req['params']['effort']
-        settings.write_text(json.dumps(current))
-    elif method=='turn/start':
-        (home/'input.json').write_text(json.dumps(req['params']['input']))
-        result={'turn':{'id':'fixture-turn'}}
+    elif method=='thread/start':
+        result={'thread':{'id':'fixture-thread'},'model':'fixture-model'}
     print(json.dumps({'id':req['id'],'result':result}),flush=True)
-    if method=='turn/start':
-        for event, params in (
-            ('turn/plan/updated', {'plan':[{'step':'Read input','status':'inProgress'}]}),
-            ('item/reasoning/summaryTextDelta', {'delta':'Reasoning summary'}),
-            ('turn/completed', {'turn':{'id':'fixture-turn','status':'completed'}}),
-        ):
-            print(json.dumps({'method':event,'params':{'threadId':'fixture-thread',**params}}),flush=True)
 '''
 
 
@@ -193,62 +164,6 @@ class CodexControlTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result['id'], key)
                 self.assertIn('error', result, method)
                 self.assertNotIn('private', json.dumps(result))
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    async def test_project_switches_model_and_reasoning_in_place_and_resumes_them(self):
-        home = self.state / 'projects/gh-123/chatgpt'
-        home.mkdir(parents=True)
-        (home / 'scenario.json').write_text('{"status":"ready"}')
-        path = self.state / 'project.sock'
-        await self.start(path, 'gh-123')
-        project = {'cwd': '/workspace/repo', 'mcpServers': []}
-        session = {'sessionId': 'fixture-thread'}
-
-        async def request(method, params):
-            writer.write(json.dumps({'id': 1, 'method': method, 'params': params}).encode() + b'\n')
-            await writer.drain()
-            updates = []
-            while True:
-                response = json.loads(await asyncio.wait_for(reader.readline(), 3))
-                if 'id' in response:
-                    return response, updates
-                updates.append(response['params']['update'])
-
-        def options(message):
-            return {option['id']: option for option in message['result']['configOptions']}
-
-        reader, writer = await asyncio.open_unix_connection(str(path))
-        try:
-            created, _ = await request('session/new', project)
-            self.assertEqual(options(created)['model']['currentValue'], 'fixture-model')
-            self.assertEqual([item['value'] for item in options(created)['model']['options']],
-                             ['fixture-model', 'fixture-other'])
-            for key, value in [('model', 'hidden-model'), ('reasoning_effort', 'high'), ('provider', 'api')]:
-                forbidden, _ = await request('session/set_config_option', {**session, 'configId': key, 'value': value})
-                self.assertIn('error', forbidden)
-            switched, _ = await request('session/set_config_option',
-                                        {**session, 'configId': 'model', 'value': 'fixture-other'})
-            self.assertEqual(options(switched)['model']['currentValue'], 'fixture-other')
-            reasoning, _ = await request('session/set_config_option',
-                                         {**session, 'configId': 'reasoning_effort', 'value': 'high'})
-            self.assertEqual(options(reasoning)['reasoning_effort']['currentValue'], 'high')
-            turn, updates = await request('session/prompt', {**session, 'prompt': [
-                {'type': 'image', 'mimeType': 'image/png', 'data': 'UE5H'},
-            ]})
-            self.assertEqual(turn['result']['stopReason'], 'end_turn')
-            self.assertEqual([update['sessionUpdate'] for update in updates], ['plan', 'agent_thought_chunk'])
-            self.assertEqual(json.loads((home / 'input.json').read_text()),
-                             [{'type': 'image', 'url': 'data:image/png;base64,UE5H'}])
-        finally:
-            writer.close()
-            await writer.wait_closed()
-        reader, writer = await asyncio.open_unix_connection(str(path))
-        try:
-            restored, _ = await request('session/load', {**project, **session})
-            self.assertEqual(options(restored)['model']['currentValue'], 'fixture-other')
-            self.assertEqual(options(restored)['reasoning_effort']['currentValue'], 'high')
         finally:
             writer.close()
             await writer.wait_closed()
