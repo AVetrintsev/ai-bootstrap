@@ -68,6 +68,11 @@ python3 tests/accept_project_memory.py "$PROJECT_A" "$PROJECT_B"
 из терминала и Canvas обоих проектов. Один факт отправки запроса или
 появление события вызова инструмента не считается успешным результатом.
 
+Сценарии общей памяти и правил поддерживают `ACCEPT_AGENTS=qwen` либо
+`ACCEPT_AGENTS=codex` для продолжения приёмки по одному агенту. По умолчанию
+проверяются оба. Частичный запуск фиксировать отдельно: он не закрывает
+матрицу до успешной проверки второго агента.
+
 ## Доступ, сеть и повторная установка
 
 Проверить активацию и регистрацию через HTTP, включая срок и одноразовость,
@@ -105,6 +110,7 @@ ACCEPT_PROJECT_A="$PROJECT_A" ACCEPT_PROJECT_B="$PROJECT_B" bash tests/accept_sa
 ```bash
 python3 tests/accept_project_recovery.py "$PROJECT_A" ./install.sh
 python3 tests/accept_project_memory.py "$PROJECT_A" "$PROJECT_B" ./install.sh
+python3 tests/accept_release_recovery.py "$PROJECT_A" "$PROJECT_B" ./install.sh
 ```
 
 ## Итоговый протокол

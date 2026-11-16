@@ -24,6 +24,15 @@ connect() {
     ai-sandbox shell "$1" timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$2" "$3"
 }
 
+ensure_project() {
+    if [[ $1 == gh-* ]]; then
+        # GitHub projects must already have been created through the portal.
+        ai-sandbox shell "$1" true
+    else
+        ai-sandbox create "$1"
+    fi
+}
+
 check_internal_tcp() (
     namespace=ai-sandbox-acceptance
     host_if=aisbx-test0
@@ -112,8 +121,8 @@ check_isolation() {
 
 case ${1:-} in
     before)
-        ai-sandbox create "$first"
-        ai-sandbox create "$second"
+        ensure_project "$first"
+        ensure_project "$second"
         ai-sandbox shell "$first" touch "$marker"
         check_isolation
         check_internal_tcp
@@ -140,7 +149,7 @@ case ${1:-} in
         ai-sandbox shell "$first" test -f "$marker"
         [[ $(ai-sandbox shell "$first" hello) == 'Hello, world!' ]]
         check_isolation
-        ai-sandbox create "$first"
+        ensure_project "$first"
         ai-sandbox shell "$first" test -f "$marker"
         ai-sandbox shell "$first" hello
         ;;
