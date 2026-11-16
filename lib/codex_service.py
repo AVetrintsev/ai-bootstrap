@@ -4,7 +4,6 @@ Only this trusted service sees ChatGPT credentials. The sandbox can send ACP
 messages, never app-server RPC, configuration, credentials, or host commands.
 """
 import asyncio
-from base64 import b64decode
 from contextlib import suppress
 import json
 import os
@@ -23,10 +22,6 @@ STATE = Path('/var/lib/ai-codex')
 BINARY = '/opt/ai-codex/bin/codex'
 API_KEY = Path('/etc/ai-bootstrap/codex-api.key')
 PROJECT = re.compile(r'gh-[1-9][0-9]{0,18}')
-MAX_ACP_LINE = 4 * 1024 * 1024
-MAX_IMAGE_DATA = 2 * 1024 * 1024
-IMAGE_TYPES = {'image/png', 'image/jpeg', 'image/gif', 'image/webp'}
-PLAN_STATUS = {'pending': 'pending', 'inProgress': 'in_progress', 'completed': 'completed'}
 MESSAGES = {
     'login_required': 'Требуется повторный вход в ChatGPT через портал /codex.',
     'limit_reached': 'Лимит подписки исчерпан. Дождитесь обновления лимита или явно выберите платный API в портале /codex.',
@@ -69,29 +64,6 @@ def save(path, value):
     temporary.write_text(value)
     temporary.chmod(0o600)
     temporary.replace(path)
-
-
-def prompt_input(parts):
-    if not isinstance(parts, list) or not parts:
-        raise ValueError('Ожидается текст или изображение.')
-    result = []
-    for part in parts:
-        if not isinstance(part, dict):
-            raise ValueError('Недействительное вложение.')
-        if part.get('type') == 'text' and isinstance(part.get('text'), str):
-            result.append({'type': 'text', 'text': part['text'], 'text_elements': []})
-        elif part.get('type') == 'image':
-            mime, data = part.get('mimeType'), part.get('data')
-            if not isinstance(mime, str) or mime not in IMAGE_TYPES or not isinstance(data, str) or not 0 < len(data) <= MAX_IMAGE_DATA:
-                raise ValueError('Приложите PNG, JPEG, GIF или WebP размером до 1,5 МиБ.')
-            try:
-                b64decode(data, validate=True)
-            except ValueError:
-                raise ValueError('Недействительные данные изображения.') from None
-            result.append({'type': 'image', 'url': f'data:{mime};base64,{data}'})
-        else:
-            raise ValueError('Поддерживаются текстовые сообщения и изображения.')
-    return result
 
 
 class AppServer:
@@ -249,8 +221,6 @@ class ProjectSession:
         self.turn = None
         self.profile = None
         self.model = None
-        self.effort = None
-        self.models = {}
         self.rules = Rules(rules_path)
 
     async def send(self, message):
@@ -265,67 +235,6 @@ class ProjectSession:
             await self.server.call('environment/info', {'environmentId': 'project'}, timeout=10)
         except CodexError:
             raise CodexError('executor_unavailable') from None
-
-    async def load_models(self):
-        # A temporarily unavailable catalog must still permit the existing model.
-        try:
-            result = await self.server.call('model/list', {'includeHidden': False}, timeout=8)
-        except CodexError:
-            return
-        self.models = {entry['model']: entry for entry in result.get('data', [])
-                       if not entry.get('hidden') and entry.get('model')}
-
-    def efforts(self):
-        return {option['reasoningEffort']: option for option in
-                self.models.get(self.model, {}).get('supportedReasoningEfforts', [])}
-
-    def config_options(self):
-        options = [{'id': 'mode', 'name': 'Режим', 'category': 'mode', 'type': 'select',
-                    'currentValue': 'project', 'options': [{'value': 'project', 'name': 'Песочница проекта'}]}]
-        if self.models:
-            choices = [{'value': model, 'name': entry['displayName'], 'description': entry['description']}
-                       for model, entry in self.models.items()]
-            if self.model not in self.models:
-                choices.insert(0, {'value': self.model, 'name': self.model})
-            options.append({'id': 'model', 'name': 'Модель', 'category': 'model', 'type': 'select',
-                            'currentValue': self.model, 'options': choices})
-        efforts = self.efforts()
-        if self.effort in efforts:
-            options.append({'id': 'reasoning_effort', 'name': 'Уровень рассуждений', 'category': 'thought_level',
-                            'type': 'select', 'currentValue': self.effort, 'options': [
-                                {'value': level, 'name': level, 'description': choice['description']}
-                                for level, choice in efforts.items()]})
-        return options
-
-    async def set_config_option(self, params):
-        if not self.session or params.get('sessionId') != self.session:
-            raise ValueError('Неизвестный разговор.')
-        if selected_profile(self.state) != self.profile:
-            raise CodexError('profile_changed')
-        option, value = params.get('configId'), params.get('value')
-        if not isinstance(value, str):
-            raise ValueError('Недействительное значение настройки.')
-        change = {'threadId': self.session}
-        if option == 'model' and value in self.models:
-            if value == self.model:
-                return {'configOptions': self.config_options()}
-            change['model'] = value
-            effort = self.models[value].get('defaultReasoningEffort')
-            if effort is not None:
-                change['effort'] = effort
-        elif option == 'reasoning_effort' and value in self.efforts():
-            change['effort'] = value
-        elif option == 'mode' and value == 'project':
-            return {'configOptions': self.config_options()}
-        else:
-            raise ValueError('Настройка или значение недоступны в этом разговоре.')
-        await self.server.call('thread/settings/update', change)
-        if 'model' in change:
-            self.model = change['model']
-            self.effort = change.get('effort')
-        elif 'effort' in change:
-            self.effort = change['effort']
-        return {'configOptions': self.config_options()}
 
     async def connect(self, params, resume=False):
         if self.server or params.get('cwd') != '/workspace/repo' or params.get('mcpServers'):
@@ -351,26 +260,23 @@ class ProjectSession:
         result = await self.server.call('thread/resume' if resume else 'thread/start', args, timeout=150)
         self.session = result['thread']['id']
         self.model = result['model']
-        self.effort = result.get('reasoningEffort')
-        await self.load_models()
-        if self.effort is None:
-            self.effort = self.models.get(self.model, {}).get('defaultReasoningEffort')
         allowed = home / 'sessions-allowed'
         allowed.mkdir(exist_ok=True, mode=0o700)
         (allowed / self.session).touch(mode=0o600)
-        return {'sessionId': self.session, 'configOptions': self.config_options(),
-                'modes': {'currentModeId': 'project', 'availableModes': [
-                    {'id': 'project', 'name': 'Песочница проекта'}]}}
+        return {'sessionId': self.session, 'modes': {'currentModeId': 'project', 'availableModes': [
+            {'id': 'project', 'name': 'Песочница проекта', 'description': 'Команды и файлы только в контейнере проекта.'}]}}
 
     async def prompt(self, params):
         if not self.server or params.get('sessionId') != self.session:
             raise ValueError('Неизвестный разговор.')
         if selected_profile(self.state) != self.profile:
             raise CodexError('profile_changed')
-        inputs = prompt_input(params.get('prompt'))
+        parts = params.get('prompt', [])
+        if not isinstance(parts, list) or not parts or any(not isinstance(p, dict) or p.get('type') != 'text' or not isinstance(p.get('text'), str) for p in parts):
+            raise ValueError('Поддерживаются текстовые сообщения.')
         await self.executor()
         result = await self.server.call('turn/start', {'threadId': self.session,
-            'input': inputs})
+            'input': [{'type': 'text', 'text': p['text'], 'text_elements': []} for p in parts]})
         self.turn = result['turn']['id']
         completed = False
         try:
@@ -384,12 +290,6 @@ class ProjectSession:
                         continue
                     if method == 'item/agentMessage/delta':
                         await self.update({'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': values['delta']}})
-                    elif method == 'item/reasoning/summaryTextDelta':
-                        await self.update({'sessionUpdate': 'agent_thought_chunk', 'content': {'type': 'text', 'text': values['delta']}})
-                    elif method == 'turn/plan/updated':
-                        await self.update({'sessionUpdate': 'plan', 'entries': [
-                            {'content': item['step'], 'priority': 'medium', 'status': PLAN_STATUS[item['status']]}
-                            for item in values['plan'] if item['status'] in PLAN_STATUS]})
                     elif method in ('item/started', 'item/completed'):
                         item = values['item']
                         if item['type'] in ('commandExecution', 'fileChange', 'mcpToolCall'):
@@ -421,14 +321,12 @@ class ProjectSession:
             if not isinstance(params, dict):
                 raise ValueError('Ожидается объект параметров.')
             if method == 'initialize':
-                result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True, 'promptCapabilities': {'image': True}},
+                result = {'protocolVersion': 1, 'agentCapabilities': {'loadSession': True},
                           'agentInfo': {'name': 'ai-bootstrap-codex', 'version': '1'}, 'authMethods': []}
             elif method in ('session/new', 'session/load'):
                 result = await self.connect(params, method == 'session/load')
             elif method == 'session/prompt':
                 result = await self.prompt(params)
-            elif method == 'session/set_config_option':
-                result = await self.set_config_option(params)
             elif method == 'session/cancel':
                 if self.turn and params.get('sessionId') == self.session:
                     await self.server.call('turn/interrupt', {'threadId': self.session, 'turnId': self.turn})
@@ -508,7 +406,7 @@ async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=A
             with suppress(OSError):
                 await writer.wait_closed()
 
-    server = await asyncio.start_unix_server(client, sock=listener, limit=MAX_ACP_LINE)
+    server = await asyncio.start_unix_server(client, sock=listener, limit=1024 * 1024)
     try:
         async with server:
             await server.serve_forever()

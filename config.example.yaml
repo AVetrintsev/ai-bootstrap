@@ -19,11 +19,7 @@ sandbox:
 #       base_url: https://openrouter.ai/api/v1
 #       key_file: /etc/ai-bootstrap/model-keys/openrouter.key
 #   models:
-#     qwen3.8-flash:
-#       provider: openrouter
-#       model: qwen/qwen3.8-flash
-#       vision: true
-#       reasoning_efforts: [low, medium, high]
+#     qwen3.8-flash: {provider: openrouter, model: qwen/qwen3.8-flash}
 #   defaults:
 #     models: [qwen3.8-flash]
 #     requests_per_day: 100
