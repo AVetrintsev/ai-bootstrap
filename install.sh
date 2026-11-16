@@ -459,11 +459,7 @@ configure_codex() {
         [[ -f $connection ]] || continue
         project=${connection##*/}
         project=${project%.json}
-        if [[ -f $etc/model-gateway.json ]]; then
-            /usr/local/sbin/ai-sandbox canvas-setup "$project"
-        else
-            /usr/local/sbin/ai-sandbox codex-setup "$project"
-        fi
+        /usr/local/sbin/ai-sandbox canvas-setup "$project"
     done
 }
 

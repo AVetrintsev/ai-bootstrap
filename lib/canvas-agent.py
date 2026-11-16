@@ -27,7 +27,7 @@ if mode == "run":
     environment = dict(os.environ, OH_SESSION_API_KEYS_0=settings["key"], OH_SECRET_KEY=settings["key"],
         OH_PERSISTENCE_DIR=str(root), OH_CONVERSATIONS_PATH=str(root / "conversations"),
         OH_BASH_EVENTS_DIR=str(root / "bash_events"), OH_WORKSPACE_PATH="/workspace/repo",
-        OH_ENABLE_VSCODE="false", DO_NOT_TRACK="1")
+        OH_CONVERSATION_WORKTREE_ROOT="/workspace/worktrees", OH_ENABLE_VSCODE="false", DO_NOT_TRACK="1")
     pidfile.write_text(str(os.getpid()))
     python = "/opt/ai-agent/bin/python"
     os.execve(python, [python, "-m", "openhands.agent_server", "--host", "127.0.0.1", "--port", "18000"], environment)
@@ -52,51 +52,28 @@ while time.monotonic() < deadline:
 else:
     sys.exit("Agent Server did not become ready")
 
-marker = config.with_name("canvas-configured")
-if not marker.exists() or marker.read_text().strip() != "2":
-    # The Qwen launcher supplies only this project's model-gateway key.
-    model = json.loads(config.with_name("model-gateway.json").read_text())["model"]
-    request("/api/settings", "PATCH", {
-        "agent_settings_diff": {"agent_kind": "acp", "acp_server": "custom", "acp_command": ["/usr/local/bin/qwen"],
-                                "acp_args": ["--acp"], "acp_model": model},
-        "misc_settings_diff": {"app_preferences": {"language": "ru", "user_consents_to_analytics": False}},
-    })
+# Profiles are managed through the public Agent Server API. Conversations and
+# their worktrees are created by the native launcher, never by provisioning.
+profiles = request("/api/agent-profiles")["profiles"]
+names = {profile["name"] for profile in profiles}
+gateway = config.with_name("model-gateway.json")
+if gateway.exists() and "qwen-code" not in names:
+    model = json.loads(gateway.read_text())["model"]
     request("/api/agent-profiles/qwen-code", "POST", {
         "agent_kind": "acp", "acp_server": "custom", "acp_command": "/usr/local/bin/qwen",
         "acp_args": ["--acp"], "acp_model": model,
     })
-    profile = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "qwen-code")
-    request("/api/agent-profiles/" + profile["id"] + "/activate", "POST")
-    marker.write_text("2\n")
-codex_marker = config.with_name("codex-configured")
-if not codex_marker.exists():
+if "codex-subscription" not in names:
     request("/api/agent-profiles/codex-subscription", "POST", {
         "agent_kind": "acp", "acp_server": "custom", "acp_command": "/usr/local/bin/codex",
         "acp_args": ["--acp"],
     })
+marker = config.with_name("native-canvas-configured")
+if not marker.exists():
     profile = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "codex-subscription")
     request("/api/agent-profiles/" + profile["id"] + "/activate", "POST")
-    codex_marker.write_text("1\n")
-try:
-    request("/api/conversations/" + settings["conversation_id"])
-except urllib.error.HTTPError as error:
-    if error.code != 404:
-        raise
-    qwen = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "qwen-code")
-    request("/api/conversations", "POST", {
-        "conversation_id": settings["conversation_id"], "agent_profile_id": qwen["id"],
-        "workspace": {"kind": "LocalWorkspace", "working_dir": "/workspace/repo"},
-        "worktree": False, "autotitle": False,
+    request("/api/settings", "PATCH", {
+        "misc_settings_diff": {"app_preferences": {"language": "ru", "user_consents_to_analytics": False}},
     })
-try:
-    request("/api/conversations/" + settings["codex_conversation_id"])
-except urllib.error.HTTPError as error:
-    if error.code != 404:
-        raise
-    profile = next(item for item in request("/api/agent-profiles")["profiles"] if item["name"] == "codex-subscription")
-    request("/api/conversations", "POST", {
-        "conversation_id": settings["codex_conversation_id"], "agent_profile_id": profile["id"],
-        "workspace": {"kind": "LocalWorkspace", "working_dir": "/workspace/repo"},
-        "worktree": False, "autotitle": False,
-    })
-print("OK Agent Server, Codex and Qwen ACP profiles")
+    marker.write_text("1\n")
+print("OK Agent Server and native ACP profiles")

@@ -10,6 +10,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import signal
+import tomllib
 
 from codex_service import API_KEY, BINARY, STATE, CodexError, selected_profile
 
@@ -77,9 +78,11 @@ class ProjectAdapter:
         self.home.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.allowed.mkdir(exist_ok=True, mode=0o700)
         config = {'developer_instructions': '', 'forced_login_method': self.profile,
-                  'approval_policy': 'never', 'sandbox_mode': 'danger-full-access'}
+                  'approval_policy': 'never', 'sandbox_mode': 'danger-full-access',
+                  'features': {'hooks': False}}
         environment = {'PATH': '/usr/bin:/bin', 'HOME': str(self.home), 'CODEX_HOME': str(self.home),
                        'CODEX_PATH': self.binary, 'CODEX_CONFIG': json.dumps(config),
+                       'DISABLE_MCP_CONFIG_FILTERING': 'true',
                        'TOKIO_WORKER_THREADS': '2', 'RAYON_NUM_THREADS': '2'}
         if self.profile == 'api':
             environment['OPENAI_API_KEY'] = self.api_key.read_text().strip()
@@ -92,6 +95,22 @@ class ProjectAdapter:
         if not isinstance(value, str) or not SESSION.fullmatch(value) or not (self.allowed / value).is_file():
             raise ValueError('Разговор не принадлежит этому проекту и способу оплаты.')
         return value
+
+    def mcp_servers(self, cwd):
+        """Native ACP overrides commands; trusted TOML keeps remote environment/cwd.
+
+        Codex requires an explicit launch cwd for remote stdio. env --chdir then
+        selects this conversation's workspace without modifying shared config.
+        """
+        path = self.home / 'config.toml'
+        config = tomllib.loads(path.read_text()) if path.exists() else {}
+        servers = []
+        for name, settings in config.get('mcp_servers', {}).items():
+            if settings.get('environment_id') != 'project' or settings.get('cwd') != '/workspace/repo':
+                raise CodexError()
+            servers.append({'name': name, 'command': '/usr/bin/env', 'args': [
+                '--chdir', cwd, settings['command'], *settings.get('args', [])], 'env': []})
+        return servers
 
     async def workspace(self, value):
         cwd = workspace_path(value)
@@ -120,7 +139,7 @@ class ProjectAdapter:
                 raise ValueError('Неизвестный ответ клиентского инструмента.')
             self.callbacks.remove(identity)
             return message
-        method, params = message['method'], message.get('params') or {}
+        method, params = message['method'], message.get('params', {})
         if not isinstance(method, str) or method not in METHODS or not isinstance(params, dict):
             raise ValueError('Этот метод недоступен из песочницы.')
         if selected_profile(self.state) != self.profile:
@@ -140,7 +159,8 @@ class ProjectAdapter:
         elif method in SETUP:
             if params.get('mcpServers') or params.get('additionalDirectories'):
                 raise ValueError('MCP запускаются в среде проекта через управляемую конфигурацию.')
-            clean = {'cwd': await self.workspace(params.get('cwd')), 'mcpServers': [],
+            cwd = await self.workspace(params.get('cwd'))
+            clean = {'cwd': cwd, 'mcpServers': self.mcp_servers(cwd),
                      'systemPrompt': {'mode': 'append', 'content': [{'type': 'text', 'text': ''}]}}
             if method != 'session/new':
                 clean['sessionId'] = self.session(params.get('sessionId'))
@@ -157,7 +177,9 @@ class ProjectAdapter:
                     if part.get('type') == 'image' and part.get('uri') and (
                             not isinstance(part['uri'], str) or not part['uri'].startswith('data:')):
                         raise ValueError('Передайте изображение вложением, без внешнего URL.')
-                first = next((part.get('text', '') for part in parts if part.get('type') == 'text'), '')
+                first = parts[0].get('text', '') if parts[0].get('type') == 'text' else ''
+                if not isinstance(first, str):
+                    raise ValueError('Ожидается текст сообщения.')
                 if re.match(r'^/\s*(logout|mcp)\b', first.strip(), re.IGNORECASE):
                     raise ValueError('Авторизация управляется через портал; MCP настроены в проекте.')
                 cwd = self.workspaces.get(identity)
@@ -218,8 +240,10 @@ class ProjectAdapter:
             text = str(error) if isinstance(error, (ValueError, CodexError)) else 'Адаптер Codex недоступен.'
             if identity is not None:
                 if message.get('method') == 'session/prompt':
+                    params = message.get('params')
+                    session = params.get('sessionId') if isinstance(params, dict) else None
                     await self.send({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
-                        'sessionId': (message.get('params') or {}).get('sessionId'),
+                        'sessionId': session,
                         'update': {'sessionUpdate': 'agent_message_chunk', 'content': {'type': 'text', 'text': text}}}})
                     await self.send({'jsonrpc': '2.0', 'id': identity, 'result': {'stopReason': 'refusal'}})
                 else:
@@ -247,6 +271,8 @@ async def serve(listener, project, **options):
         try:
             if slots.locked():
                 message = json.loads(await asyncio.wait_for(reader.readline(), 5))
+                if not isinstance(message, dict):
+                    return
                 await adapter.send({'jsonrpc': '2.0', 'id': message.get('id'), 'error': {
                     'code': -32000, 'message': 'Закройте один из открытых сеансов Codex.'}})
                 return

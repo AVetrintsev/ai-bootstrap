@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from aiohttp import ClientSession, web
 from aiohttp.test_utils import TestServer
@@ -46,6 +47,28 @@ class CanvasTest(unittest.IsolatedAsyncioTestCase):
         async with self.client.get(self.server.make_url("/conversations"),
                                    cookies={"ai_session": self.session}) as response:
             self.assertEqual(response.status, 404)
+
+    async def test_project_entry_uses_native_registration_without_fixed_conversation_or_storage(self):
+        backend = web.Application()
+        backend.router.add_get('/server_info', lambda request: web.json_response({}))
+        backend.router.add_get('/api/settings', lambda request: web.json_response({}))
+        runner = web.AppRunner(backend)
+        await runner.setup()
+        self.addAsyncCleanup(runner.cleanup)
+        await web.UnixSite(runner, str(self.root / 'gh-7.sock')).start()
+        (self.root / 'gh-7.json').write_text(json.dumps({'key':'private-project-key'}))
+        with patch('canvas.github_request', return_value={'projects':[
+                {'sandbox':'gh-7','name':'owner/<repo>','state':'ready','canvas':'ready'}]}):
+            async with self.client.get(self.server.make_url('/canvas/open/gh-7'),
+                                      cookies={'ai_session':self.session}) as response:
+                body=await response.text()
+                self.assertEqual(response.status, 200, body)
+                self.assertIn('Manage backends', body)
+                self.assertIn('/conversations', body)
+                self.assertIn('/agent/gh-7', body)
+                self.assertIn('owner/&lt;repo&gt;', body)
+                for forbidden in ('localStorage', 'sessionStorage', 'private-project-key', '?backend='):
+                    self.assertNotIn(forbidden, body)
 
     async def test_project_api_supplies_its_key_and_revocation_closes_live_websocket(self):
         async def api(request):

@@ -664,8 +664,7 @@ class Portal:
         if project["state"] == "ready":
             connection = project.get("canvas", "pending")
             if connection == "ready":
-                canvas = (f'<p><a href="/canvas/open/{escape(project["sandbox"])}">Открыть</a> '
-                          f'· <a href="/canvas/open/{escape(project["sandbox"])}?agent=qwen">Qwen Code</a></p>')
+                canvas = f'<p><a href="/canvas/open/{escape(project["sandbox"])}">Открыть</a></p>'
             elif connection == "connecting":
                 canvas = "<p>Подключение Canvas… Обновите страницу через минуту.</p>"
             else:

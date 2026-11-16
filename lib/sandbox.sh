@@ -187,6 +187,17 @@ directory.mkdir(mode=0o700,parents=True,exist_ok=True)
 path=directory/"model-gateway.json"
 path.write_text(json.dumps(settings))
 path.chmod(0o600)
+qwen = pathlib.Path("/root/.qwen/settings.json")
+qwen.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+preferences = json.loads(qwen.read_text()) if qwen.exists() else {}
+preferences.setdefault("modelProviders", {})["openai"] = [
+    {"id": model, "baseUrl": settings["base_url"], "envKey": "OPENAI_API_KEY"}
+    for model in settings["models"]
+]
+staged = qwen.with_suffix(".json.tmp")
+staged.write_text(json.dumps(preferences, indent=2) + "\n")
+staged.chmod(0o600)
+staged.replace(qwen)
 '
 }
 
@@ -292,11 +303,9 @@ configure_search() {
         < /usr/local/libexec/ai-bootstrap/project-search-setup.sh
 }
 
-configure_tools() {
-    local image=$project_dir/disk.ext4 loop generation previous
-    local memory_enabled=no
+configure_project_memory() {
+    local generation previous
     if [[ -f /etc/ai-bootstrap/project-memory.json ]]; then
-        memory_enabled=yes
         systemctl enable --now "ai-bootstrap-memory@$project.socket"
         generation=$(sha256sum /usr/local/libexec/ai-bootstrap/project_memory.py \
             /usr/local/libexec/ai-bootstrap/shared_memory_client.py \
@@ -308,6 +317,13 @@ configure_tools() {
         fi
         as_project podman exec project python3 -I /usr/local/lib/ai-bootstrap/memory-client --check
         printf '%s' "$generation" > "$project_dir/memory-generation"
+    fi
+}
+
+configure_tools() {
+    local image=$project_dir/disk.ext4 loop generation previous memory_enabled=no
+    if [[ -f /etc/ai-bootstrap/project-memory.json ]]; then
+        memory_enabled=yes
     fi
     # Grow in place: preserve the rootless container, packages and all project files.
     if [[ $(stat -c %s "$image") -lt 8589934592 ]]; then
@@ -337,13 +353,7 @@ configure_tools() {
     fi
     # This records deployed code, not readiness. A timeout/retry must not restart a live index job.
     printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-project-tools/generation'
-    for attempt in {1..400}; do
-        if as_project podman exec project python3 -I /opt/ai-project-tools/graph.py ready >/dev/null 2>&1; then
-            return
-        fi
-        sleep 2
-    done
-    die 'project index is not ready; retry setup in the same sandbox'
+    # CGC indexes in its own service. Chat does not depend on index readiness.
 }
 
 configure_codex() {
@@ -386,12 +396,11 @@ configure_codex() {
 
 configure_canvas() {
     [[ $project =~ ^gh-[1-9][0-9]{0,18}$ && $# == 0 && -f $github_marker ]] || die 'invalid GitHub project'
-    [[ -f /etc/ai-bootstrap/model-gateway.json ]] || die 'configure the model gateway before Canvas'
     exec 9>/run/lock/ai-bootstrap-sandbox.lock
     flock 9
     project_account
     configure_qwen
-    configure_tools
+    configure_project_memory
     configure_codex
     source /etc/ai-bootstrap/sandbox-release.env
     local generation previous
@@ -405,13 +414,9 @@ configure_canvas() {
     as_project podman exec --interactive project bash -s -- "$AGENT_SERVER_VERSION" \
         < /usr/local/libexec/ai-bootstrap/canvas-setup.sh
     python3 -I - "$project" <<'PY'
-import grp,json,os,pathlib,secrets,sys,uuid
+import grp,json,os,pathlib,secrets,sys
 path=pathlib.Path('/var/lib/ai-canvas/connections')/(sys.argv[1]+'.json')
 settings=json.loads(path.read_text()) if path.exists() else {'key':secrets.token_urlsafe(32)}
-if 'conversation_id' not in settings:
-    settings['conversation_id']=str(uuid.uuid4())
-if 'codex_conversation_id' not in settings:
-    settings['codex_conversation_id']=str(uuid.uuid4())
 path.write_text(json.dumps(settings))
 path.chmod(0o640)
 os.chown(path,0,grp.getgrnam('ai-portal').gr_gid)
@@ -435,6 +440,9 @@ PY
     fi
     printf '%s' "$generation" | as_project podman exec --interactive project sh -c 'cat > /opt/ai-canvas-control/generation'
     systemctl enable --now "ai-bootstrap-canvas-relay@$project.socket"
+    # Installation and indexing of optional code tools run outside Canvas setup.
+    systemd-run --quiet --no-block --collect --unit="ai-bootstrap-tools-$project" \
+        /usr/local/sbin/ai-sandbox tools-setup "$project" || printf 'Could not schedule optional tools for %s\n' "$project" >&2
 }
 
 github_delete() {
@@ -509,7 +517,7 @@ case $action in
         exec 9>/run/lock/ai-bootstrap-sandbox.lock
         flock 9
         project_account
-        configure_tools
+        configure_project_memory
         configure_codex
         ;;
     resources)

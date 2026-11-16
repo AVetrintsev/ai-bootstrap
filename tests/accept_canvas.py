@@ -73,20 +73,25 @@ try:
                 break
             page.wait_for_timeout(2000)
             page.reload()
-        row.get_by_role("link", name="Открыть" if agent == 'codex' else "Qwen Code", exact=True).click()
-        page.get_by_test_id("chat-input").wait_for(timeout=90000)
-        if tool in ('project-tools', 'memory', 'shared-memory'):
-            # Keep test runs independent of existing conversations and their pending turns.
-            profiles = page.request.get(f'http://localhost:8080/agent/{project}/api/agent-profiles').json()['profiles']
-            profile = next(p for p in profiles if p['name'] == ('codex-subscription' if agent == 'codex' else 'qwen-code'))
-            test_conversation = str(uuid.uuid4())
-            created = page.request.post(f'http://localhost:8080/agent/{project}/api/conversations', data={
-                'conversation_id': test_conversation, 'agent_profile_id': profile['id'],
-                'workspace': {'kind': 'LocalWorkspace', 'working_dir': '/workspace/repo'},
-                'worktree': False, 'autotitle': False})
-            assert created.ok, created.text()
-            page.goto(f'http://localhost:8080/conversations/{test_conversation}?backend={project}')
-            page.get_by_test_id('chat-input').wait_for(timeout=90000)
+        row.get_by_role('link', name='Открыть', exact=True).click()
+        page.get_by_role('link', name='Открыть Canvas', exact=True).click()
+        page.get_by_test_id('add-backend-option-agent-server').click()
+        page.get_by_test_id('add-backend-name').fill(project)
+        page.get_by_test_id('add-backend-host').fill(f'http://localhost:8080/agent/{project}')
+        page.get_by_test_id('add-backend-api-key').fill('portal-session')
+        page.get_by_test_id('add-backend-submit').click()
+        page.get_by_test_id('add-backend-agent-server-panel').wait_for(state='hidden')
+        # Keep test runs independent of existing conversations and pending turns.
+        profiles = page.request.get(f'http://localhost:8080/agent/{project}/api/agent-profiles').json()['profiles']
+        profile = next(p for p in profiles if p['name'] == ('codex-subscription' if agent == 'codex' else 'qwen-code'))
+        test_conversation = str(uuid.uuid4())
+        created = page.request.post(f'http://localhost:8080/agent/{project}/api/conversations', data={
+            'conversation_id': test_conversation, 'agent_profile_id': profile['id'],
+            'workspace': {'kind': 'LocalWorkspace', 'working_dir': '/workspace/repo'},
+            'worktree': False, 'autotitle': False})
+        assert created.ok, created.text()
+        page.goto(f'http://localhost:8080/conversations/{test_conversation}')
+        page.get_by_test_id('chat-input').wait_for(timeout=90000)
         print("Canvas URL:", page.url)
         prompt = (f"Use the shell tool to run exactly: test \"$PWD\" = /workspace/repo && printf '%s' '{marker}' > '{marker_path}'\n"
                   "Do not read or change any other files. Then reply DONE.")
@@ -212,7 +217,7 @@ try:
                 page.wait_for_timeout(1000)
             else:
                 raise AssertionError('Agent Server did not recover')
-            page.goto(f'http://localhost:8080/canvas/open/{project}')
+            page.goto(f'http://localhost:8080/conversations/{test_conversation}')
             page.get_by_test_id('chat-input').wait_for(timeout=90000)
             page.wait_for_timeout(5000)
             absent = subprocess.run(['ai-sandbox', 'shell', project, 'test', '!', '-e', marker_path + '-blocked'])

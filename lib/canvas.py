@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import suppress
+from html import escape
 import json
 from pathlib import Path
 import re
@@ -49,9 +50,6 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
     async def open_project(request):
         project = request.match_info["project"]
         config = connection(project)
-        conversation = config.get("codex_conversation_id", config["conversation_id"])
-        if request.query.get("agent") == "qwen":
-            conversation = config["conversation_id"]
         projects = await asyncio.to_thread(github_request, "projects")
         selected = next((item for item in projects.get("projects", []) if item["sandbox"] == project), None)
         if not selected or selected["state"] != "ready" or selected.get("canvas") != "ready":
@@ -59,7 +57,7 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
         try:
             async with ClientSession(connector=UnixConnector(path=str(socket_dir / f"{project}.sock")),
                                      timeout=ClientTimeout(total=15)) as client:
-                for path in ("/server_info", "/api/settings", "/api/conversations/" + conversation):
+                for path in ("/server_info", "/api/settings"):
                     async with client.get("http://localhost" + path, headers={"X-Session-API-Key": config["key"]}) as ready:
                         if ready.status != 200:
                             raise OSError("Agent Server is not ready")
@@ -69,22 +67,20 @@ def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"),
             return web.Response(status=503, content_type="text/html", text=
                 '<html lang="ru"><meta charset="utf-8"><h1>Подключение Canvas не завершено</h1>'
                 '<p><a href="/projects">К проектам — повторить подключение</a></p></html>')
-        # Canvas 1.39.0 registry format and URL selection are pinned together.
-        # The real Agent Server key stays on the platform; the authenticated proxy supplies it.
-        value = json.dumps({"id": project, "name": selected["name"], "conversation": conversation}).replace("<", "\\u003c")
-        script = """const project=PROJECT,id=project.id;
-const entry={id,name:project.name,host:location.origin+'/agent/'+id,apiKey:'portal-session',kind:'local'};
-let entries=[];
-try { entries=JSON.parse(localStorage.getItem('openhands-backends')||'[]'); } catch {}
-if (!Array.isArray(entries)) entries=[];
-localStorage.setItem('openhands-backends',JSON.stringify([...entries.filter(x=>x.id!==id),entry]));
-sessionStorage.setItem('openhands-active-backend',JSON.stringify({backendId:id,orgId:null}));
-localStorage.setItem('openhands-onboarded','1');
-location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?backend='+encodeURIComponent(id));""".replace("PROJECT", value)
+        # Backend registration belongs to the native Add backend dialog.
+        # The placeholder is not a secret; the authenticated proxy adds the real key.
+        host = escape(f"{request.scheme}://{request.host}/agent/{project}", quote=True)
+        name = escape(selected["name"])
         return web.Response(content_type="text/html", text=
-            '<!doctype html><html lang="ru"><meta charset="utf-8"><title>Открытие проекта</title>'
-            '<p>Открываем Canvas…</p><script>' + script + '</script></html>')
-
+            '<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+            '<title>Подключение проекта</title><style>body{font:18px/1.6 system-ui;max-width:46rem;margin:3rem auto;padding:0 1rem}'
+            'code{overflow-wrap:anywhere}a{color:#185abc}</style>'
+            f'<h1>{name}</h1><p><a href="/conversations">Открыть Canvas</a></p>'
+            '<p>Выберите этот проект в списке подключений Canvas. Если его ещё нет, откройте '
+            '<b>Manage backends → Add backend</b> и укажите:</p>'
+            f'<p>Name: <code>{name}</code><br>Host: <code>{host}</code><br>API key: <code>portal-session</code></p>'
+            '<p>Создайте разговор с профилем Codex или Qwen Code. Для отдельной рабочей копии включите Worktree.</p>'
+            '<p><a href="/projects">К проектам</a></p></html>')
     async def activity(request):
         # Only the same-origin frontend records trusted user gestures, never a timer.
         if request.headers.get("Origin") != f"{request.scheme}://{request.host}":
