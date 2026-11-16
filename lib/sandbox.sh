@@ -179,14 +179,18 @@ configure_qwen() {
     as_project podman exec project chmod 0755 /usr/local/bin/qwen
     client=$(runuser -u ai-models -- python3 -I /usr/local/libexec/ai-bootstrap/model_gateway.py provision "$project")
     printf '%s' "$client" | as_project podman exec --interactive --env "AI_GATEWAY_HOST=$gateway_host" project python3 -I -c '
-import json,os,pathlib,sys
+import json,os,pathlib,sys,tempfile
 settings=json.load(sys.stdin)
+models=settings.pop("qwen_models")
 settings["base_url"]="http://"+os.environ["AI_GATEWAY_HOST"]+":18081/v1"
 directory=pathlib.Path("/root/.config/ai-bootstrap")
 directory.mkdir(mode=0o700,parents=True,exist_ok=True)
-path=directory/"model-gateway.json"
-path.write_text(json.dumps(settings))
-path.chmod(0o600)
+def publish(name, content):
+    with tempfile.NamedTemporaryFile(dir=directory, mode="w", delete=False) as target:
+        json.dump(content, target)
+    pathlib.Path(target.name).replace(directory/name)
+publish("model-gateway.json", settings)
+publish("qwen-providers.json", {"modelProviders": {"openai": models}})
 '
 }
 

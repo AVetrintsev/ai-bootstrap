@@ -14,6 +14,9 @@ environment = dict(os.environ)
 base_url = "http://" + environment["AI_GATEWAY_HOST"] + ":18081/v1" if environment.get("AI_GATEWAY_HOST") else settings["base_url"]
 environment.update(OPENAI_API_KEY=settings["api_key"], OPENAI_BASE_URL=base_url,
                    OPENAI_MODEL=settings["model"], QWEN_MODEL=settings["model"])
+catalog = Path("/root/.config/ai-bootstrap/qwen-providers.json")
+if catalog.is_file():
+    environment["QWEN_CODE_SYSTEM_DEFAULTS_PATH"] = str(catalog)
 environment.setdefault("NODE_OPTIONS", "--max-old-space-size=512")
 arguments = sys.argv[1:]
 defaults = []

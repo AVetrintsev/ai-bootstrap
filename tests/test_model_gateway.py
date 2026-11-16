@@ -132,6 +132,25 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.request(request, token=beta["api_key"])[0], 200)
         self.assertEqual(len(Provider.requests), 3)
 
+    def test_native_qwen_receives_project_catalog_and_validated_reasoning_reaches_provider(self):
+        settings = json.loads(self.config.read_text())
+        settings["models"]["coder"].update(vision=True, reasoning_efforts=["low", "high"])
+        settings["models"]["unrelated"] = {"provider": "test", "model": "inaccessible"}
+        self.config.write_text(json.dumps(settings))
+        catalog = model_gateway.provision(self.config, self.state, "alpha")["qwen_models"]
+        self.assertEqual([item["id"] for item in catalog], ["coder"])
+        self.assertEqual(catalog[0]["capabilities"], {
+            "vision": True, "reasoning": {"profile": "openai-reasoning", "efforts": ["low", "high"]},
+        })
+        self.assertEqual(catalog[0]["envKey"], "OPENAI_API_KEY")
+        request = {"model": "coder", "messages": []}
+        self.assertEqual(self.request(dict(request, reasoning={"effort": "max"}))[0], 400)
+        self.assertEqual(self.request(dict(request, reasoning={"enabled": "true"}))[0], 400)
+        self.assertEqual(self.request(dict(request, reasoning={"effort": "high"}))[0], 200)
+        self.assertEqual(Provider.requests[0][2]["reasoning"], {"effort": "high"})
+        self.assertEqual(self.request(dict(request, reasoning={"enabled": False}))[0], 200)
+        self.assertEqual(Provider.requests[1][2]["reasoning"], {"enabled": False})
+
     def test_streaming_tool_calls_and_output_limits_cannot_be_overridden(self):
         status, body = self.request({"model": "coder", "messages": [], "stream": True,
                                      "max_tokens": 128, "max_completion_tokens": 999999, "n": 5})

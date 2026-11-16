@@ -28,6 +28,7 @@ window.__AGENT_CANVAS_DO_NOT_TRACK__=true;
   for (const event of ['pointerdown','keydown']) document.addEventListener(event,recordActivity,{capture:true});
 })();
 </script>"""
+REASONING_SCRIPT = '<script defer src="/canvas/reasoning.js"></script>'
 
 
 def create_app(owner, assets, connections, *, socket_dir=Path("/run/ai-canvas"), check_interval=1):
@@ -183,7 +184,7 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
         if "." in Path(relative).name or relative.startswith(("agent/", "api/", "sockets", "canvas/")):
             raise web.HTTPNotFound()
         content = (assets / "index.html").read_text()
-        content = content.replace("</head>", ACTIVITY_SCRIPT + "</head>", 1)
+        content = content.replace("</head>", ACTIVITY_SCRIPT + REASONING_SCRIPT + "</head>", 1)
         response = web.Response(text=content, content_type="text/html")
         environ = {"HTTP_" + key.upper().replace("-", "_"): value for key, value in request.headers.items()}
         if foreground_navigation(environ):
@@ -191,9 +192,14 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
             renew_cookie(response, request)
         return response
 
+    async def reasoning_script(_):
+        return web.FileResponse(Path(__file__).with_name("canvas-reasoning.js"),
+                                headers={"Content-Type": "text/javascript"})
+
     app = web.Application(middlewares=[authenticated], client_max_size=16 * 1024 * 1024)
     app.router.add_get("/canvas/open/{project}", open_project)
     app.router.add_post("/canvas/activity", activity)
+    app.router.add_get("/canvas/reasoning.js", reasoning_script)
     app.router.add_route("*", "/agent/{project}/{path:.*}", proxy)
     app.router.add_route("*", "/{path:.*}", static)
     return app

@@ -26,6 +26,7 @@ STATE = Path("/var/lib/ai-models")
 PORT = 18081
 MAX_BODY = 2 * 1024 * 1024
 PROJECT = re.compile(r"[a-z][a-z0-9-]{0,23}")
+REASONING_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def configuration(path):
@@ -57,6 +58,14 @@ def validate_settings(settings):
             raise ValueError("invalid model_gateway model alias")
         if not isinstance(model.get("provider"), str) or model["provider"] not in providers or not isinstance(model.get("model"), str) or not model["model"].strip():
             raise ValueError("model_gateway model requires a known provider and upstream model")
+        if "vision" in model and type(model["vision"]) is not bool:
+            raise ValueError("model_gateway model vision must be a boolean")
+        if "reasoning_efforts" in model:
+            efforts = model["reasoning_efforts"]
+            if (not isinstance(efforts, list) or not efforts
+                    or any(effort not in REASONING_EFFORTS for effort in efforts)
+                    or len(set(efforts)) != len(efforts)):
+                raise ValueError("model_gateway model reasoning_efforts must list distinct supported levels")
     projects = settings.get("projects", {})
     if not isinstance(projects, dict) or any(not isinstance(name, str) or not PROJECT.fullmatch(name) for name in projects):
         raise ValueError("invalid model_gateway projects")
@@ -109,7 +118,17 @@ def provision(config, state, project):
         connection.execute("INSERT OR IGNORE INTO projects VALUES (?, ?, ?)",
                            (project, token, hashlib.sha256(token.encode()).hexdigest()))
         row = connection.execute("SELECT token FROM projects WHERE name = ?", (project,)).fetchone()
-    return {"api_key": row["token"], "model": policy["models"][0],
+    qwen_models = []
+    for alias in policy["models"]:
+        model = settings["models"][alias]
+        capabilities = {"vision": model["vision"]} if "vision" in model else {}
+        if "reasoning_efforts" in model:
+            capabilities["reasoning"] = {"profile": "openai-reasoning", "efforts": model["reasoning_efforts"]}
+        qwen_models.append({
+            "id": alias, "envKey": "OPENAI_API_KEY", "baseUrl": "${OPENAI_BASE_URL}",
+            "capabilities": capabilities,
+        })
+    return {"api_key": row["token"], "model": policy["models"][0], "qwen_models": qwen_models,
             "models": policy["models"], "max_output_tokens": policy["max_output_tokens"]}
 
 
@@ -210,6 +229,15 @@ class Handler(BaseHTTPRequestHandler):
         if type(tokens) is not int or tokens < 1 or not isinstance(body.get("messages"), list) or type(body.get("stream", False)) is not bool:
             self.error(400, "invalid_request", "Invalid messages, stream or output token limit.")
             return
+        reasoning = body.get("reasoning")
+        if reasoning is not None and (
+            not isinstance(reasoning, dict) or not reasoning or reasoning.keys() - {"enabled", "effort"}
+            or ("enabled" in reasoning and type(reasoning["enabled"]) is not bool)
+            or ("effort" in reasoning and reasoning["effort"] not in model.get("reasoning_efforts", ()))
+            or not model.get("reasoning_efforts")
+        ):
+            self.error(400, "invalid_reasoning", "Reasoning is not configured for this model or level.")
+            return
         if not reserve_request(self.gateway.state, project, policy["requests_per_day"]):
             self.error(429, "project_quota_exceeded", "The project's daily request limit is exhausted; it resets at 00:00 UTC.")
             return
@@ -219,6 +247,8 @@ class Handler(BaseHTTPRequestHandler):
             "stream", "stream_options", "enable_thinking", "reasoning_effort",
         }}
         outgoing["model"] = model["model"]
+        if reasoning is not None:
+            outgoing["reasoning"] = reasoning
         outgoing["max_tokens"] = min(tokens, policy["max_output_tokens"])
         outgoing["n"] = 1
         endpoint = urlsplit(provider["base_url"])
