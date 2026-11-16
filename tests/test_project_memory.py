@@ -196,9 +196,10 @@ class MemoryTest(unittest.IsolatedAsyncioTestCase):
                 listing = await client.list_tools()
                 self.assertIn('add_memory', [tool.name for tool in listing.tools])
                 added = await client.call_tool('add_memory', {'name': 'SDK', 'episode_body': 'Shared via standard MCP.'})
-                self.assertFalse(added.isError)
+                # MCP SDK 2 uses snake_case attributes; the wire field is stable.
+                self.assertFalse(added.model_dump(by_alias=True)['isError'])
                 records = await client.call_tool('get_episodes', {})
-                self.assertFalse(records.isError)
+                self.assertFalse(records.model_dump(by_alias=True)['isError'])
                 self.assertIn('Shared via standard MCP.', str(records.content))
 
 

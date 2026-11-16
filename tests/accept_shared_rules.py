@@ -23,6 +23,9 @@ if (os.geteuid() != 0 or len(sys.argv) not in (4, 5)
         or sys.argv[1] == sys.argv[2]):
     sys.exit('Usage: sudo BROWSER_PYTHON tests/accept_shared_rules.py PROJECT OTHER CHROMIUM [INSTALLER]')
 projects = sys.argv[1:3]
+agents = tuple(os.environ.get('ACCEPT_AGENTS', 'codex,qwen').split(','))
+if not agents or len(set(agents)) != len(agents) or any(agent not in ('codex', 'qwen') for agent in agents):
+    sys.exit('ACCEPT_AGENTS must select codex, qwen or codex,qwen')
 chromium = sys.argv[3]
 marker = 'rules-' + secrets.token_hex(8)
 prompt = (f'Rule check {marker}. If an owner instruction defines the response to this check, follow it. '
@@ -179,7 +182,7 @@ try:
                 print('OK owner deleted the rule in the browser', flush=True)
             expected = marker + '-' + phase if phase != 'deleted' else 'NO_SHARED_RULE'
             for project in projects:
-                for agent in ('codex', 'qwen'):
+                for agent in agents:
                     terminal(project, agent, expected)
                     canvas(context, project, agent, expected)
         browser.close()

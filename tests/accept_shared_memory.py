@@ -23,6 +23,9 @@ if (os.geteuid() != 0 or len(sys.argv) not in (4, 5)
         or sys.argv[1] == sys.argv[2]):
     sys.exit('Usage: sudo BROWSER_PYTHON tests/accept_shared_memory.py PROJECT OTHER CHROMIUM [INSTALLER]')
 project, other, chromium = sys.argv[1:4]
+agents = tuple(os.environ.get('ACCEPT_AGENTS', 'codex,qwen').split(','))
+if not agents or len(set(agents)) != len(agents) or any(agent not in ('codex', 'qwen') for agent in agents):
+    sys.exit('ACCEPT_AGENTS must select codex, qwen or codex,qwen')
 tests = Path(__file__).resolve().parent
 names = ['shared-' + secrets.token_hex(8) for _ in range(2)]
 session = secrets.token_urlsafe(32)
@@ -81,8 +84,8 @@ with sqlite3.connect(database) as db:
     db.execute('INSERT INTO sessions(token_hash,expires_at,name,registered_at,last_active_at) VALUES(?,?,?,?,?)',
                (token_hash, now + 3600, 'Shared memory acceptance', now, now))
 try:
-    agent_call(project, 'codex', names[0], 'propose')
-    agent_call(other, 'qwen', names[1], 'propose')
+    agent_call(project, agents[0], names[0], 'propose')
+    agent_call(other, agents[-1], names[1], 'propose')
     with MemoryClient(project) as memory:
         private = memory.call('add_memory', name=names[0], episode_body='Private acceptance color is purple.')['uuid']
     with sync_playwright() as playwright:
@@ -126,17 +129,17 @@ try:
                 assert memory.request('tools/call', {'name': tool, 'arguments': {'uuid': private}}).get('isError')
             assert private not in [item['uuid'] for item in memory.call('get_episodes')['episodes']]
         for project_name in (project, other):
-            for agent in ('codex', 'qwen'):
+            for agent in agents:
                 agent_call(project_name, agent, names[0], identities[0])
-        print('OK both real agents read approved memory in both projects; private memory remains isolated', flush=True)
-        for agent in ('codex', 'qwen'):
+        print(f'OK {", ".join(agents)} read approved memory in both projects; private memory remains isolated', flush=True)
+        for agent in agents:
             log = Path('/tmp') / (names[0] + '-' + agent + '-canvas.log')
             with log.open('w') as output:
                 run(sys.executable, str(tests / 'accept_canvas.py'), project, chromium,
                     agent, 'shared-memory', identities[0], stdout=output, stderr=subprocess.STDOUT, timeout=900)
             print(f'OK {agent} Canvas completed shared read and proposal; {log}', flush=True)
         pending = pending_fixture_ids(page, names[0])
-        assert len(pending) >= 2, 'Canvas proposals are absent from the portal'
+        assert len(pending) >= len(agents), 'Canvas proposals are absent from the portal'
         with MemoryClient(other) as memory:
             for identity in pending:
                 assert memory.request('tools/call', {'name': 'get_shared_memory', 'arguments': {'uuid': identity}}).get('isError')
