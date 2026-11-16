@@ -74,6 +74,7 @@ def prompt(page, endpoint, editor, word):
 
 def check(page, profile_id, name):
     identifier = str(uuid.uuid4())
+    print(f"{name}: temporary conversation {identifier}", flush=True)
     endpoint = f"conversations/{identifier}"
     api(page, "conversations", "POST", {
         "conversation_id": identifier,
@@ -86,7 +87,15 @@ def check(page, profile_id, name):
         page.goto(f"{origin}/conversations/{identifier}?backend={project}")
         editor = page.get_by_test_id("chat-input")
         picker = page.get_by_test_id("ai-bootstrap-reasoning")
-        picker.wait_for(timeout=60000)
+        try:
+            picker.wait_for(timeout=60000)
+        except BrowserTimeout:
+            info = json.loads(api(page, endpoint + "?initialize_acp=false"))
+            raise AssertionError(
+                f"{name}: controls unavailable in a new conversation "
+                f"(state={info['execution_status']}, models={len(info['available_models'])}, "
+                f"efforts={len(info['available_efforts'])})"
+            ) from None
         model = page.get_by_test_id("chat-input-llm-model")
         model.wait_for(timeout=30000)
         page.set_viewport_size({"width": 390, "height": 850})
@@ -130,7 +139,8 @@ def check(page, profile_id, name):
 try:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=chromium, headless=True, args=[
-            "--no-sandbox", f"--host-resolver-rules=MAP {address.hostname} 127.0.0.1",
+            "--no-sandbox", "--disable-dev-shm-usage",
+            f"--host-resolver-rules=MAP {address.hostname} 127.0.0.1",
         ])
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         context.add_cookies([{"name": "ai_session", "value": token, "url": origin,
