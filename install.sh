@@ -65,7 +65,10 @@ preflight() {
     exec 8>/run/lock/ai-bootstrap-install.lock
     flock -n 8 || fail 'another installer is running'
     work=$(mktemp -d /run/ai-bootstrap.XXXXXX)
-    trap 'rm -rf -- "$work"' EXIT
+    trap 'rm -rf -- "$work"; if [[ -n ${assets:-} ]]; then rm -rf -- "$assets"; fi' EXIT
+    # Large public packages must not exhaust /run (a small tmpfs on Ubuntu).
+    # Keep secrets in $work; stage binaries beside /opt for same-filesystem moves.
+    assets=$(mktemp -d /opt/.ai-bootstrap.XXXXXX)
 
     # The YAML reader is a prerequisite and installs no service of its own.
     export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
@@ -392,13 +395,13 @@ configure_canvas() {
     install -d -m 0755 /opt/ai-canvas
     if [[ ! -f /opt/ai-canvas/version || $(cat /opt/ai-canvas/version) != "$AGENT_CANVAS_VERSION" ]]; then
         quiet 'could not download pinned Canvas' curl -q --fail --silent --show-error --location \
-            --proto '=https' --proto-redir '=https' --output "$work/canvas.tgz" \
+            --proto '=https' --proto-redir '=https' --output "$assets/canvas.tgz" \
             "https://registry.npmjs.org/@openhands/agent-canvas/-/agent-canvas-$AGENT_CANVAS_VERSION.tgz"
-        printf '%s  %s\n' "$AGENT_CANVAS_SHA256" "$work/canvas.tgz" | sha256sum --check --status ||
+        printf '%s  %s\n' "$AGENT_CANVAS_SHA256" "$assets/canvas.tgz" | sha256sum --check --status ||
             fail 'Canvas archive checksum mismatch'
-        install -d -m 0755 "$work/canvas"
-        tar -xzf "$work/canvas.tgz" -C "$work/canvas" --no-same-owner package/build
-        cp -a "$work/canvas/package/build/." /opt/ai-canvas/build.new/
+        install -d -m 0755 "$assets/canvas"
+        tar -xzf "$assets/canvas.tgz" -C "$assets/canvas" --no-same-owner package/build
+        cp -a "$assets/canvas/package/build/." /opt/ai-canvas/build.new/
         chmod -R a+rX /opt/ai-canvas/build.new
         # Keep the previous frontend until extraction and integrity checks have succeeded.
         rm -rf -- /opt/ai-canvas/build.previous
@@ -429,15 +432,15 @@ configure_codex() {
     install -d -m 0700 -o ai-codex -g ai-codex /var/lib/ai-codex /var/lib/ai-codex/auth
     if [[ ! -x /opt/ai-codex/bin/codex-code-mode-host || ! -x /opt/ai-codex/bin/codex || $(/opt/ai-codex/bin/codex --version) != "codex-cli $CODEX_VERSION" ]]; then
         quiet 'could not download pinned Codex' curl -q --fail --silent --show-error --location \
-            --proto '=https' --proto-redir '=https' --output "$work/codex.tgz" \
+            --proto '=https' --proto-redir '=https' --output "$assets/codex.tgz" \
             "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/codex-package-x86_64-unknown-linux-musl.tar.gz"
-        printf '%s  %s\n' "$CODEX_SHA256" "$work/codex.tgz" | sha256sum --check --status || fail 'Codex checksum mismatch'
-        install -d -m 0755 "$work/codex-package"
-        tar -xzf "$work/codex.tgz" -C "$work/codex-package" --no-same-owner
-        chmod -R a+rX "$work/codex-package"
+        printf '%s  %s\n' "$CODEX_SHA256" "$assets/codex.tgz" | sha256sum --check --status || fail 'Codex checksum mismatch'
+        install -d -m 0755 "$assets/codex-package"
+        tar -xzf "$assets/codex.tgz" -C "$assets/codex-package" --no-same-owner
+        chmod -R a+rX "$assets/codex-package"
         rm -rf -- /opt/ai-codex.previous
         if [[ -d /opt/ai-codex ]]; then mv /opt/ai-codex /opt/ai-codex.previous; fi
-        mv "$work/codex-package" /opt/ai-codex
+        mv "$assets/codex-package" /opt/ai-codex
     fi
     local file unit
     for file in codex_service.py codex-project.py codex-executor.py codex-client; do
