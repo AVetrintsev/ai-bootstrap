@@ -51,6 +51,27 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(transport, "local-http\n")
 
+    def test_defaults_to_https_and_stages_public_endpoint(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        config = example.replace("  transport: local-http\n", "  domain: Portal.Example.org\n  expected_ipv4: 8.8.4.4\n")
+        result, endpoint = self.stage(config, artifact="portal-public")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(endpoint, "portal.example.org 8.8.4.4\n")
+        result, firewall = self.stage(config, artifact="firewall-public.nft")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tcp dport { 80, 443 } ct state new accept", firewall)
+        self.assertIn("tcp sport { 80, 443 } ct direction reply ct state established accept", firewall)
+        _, local_firewall = self.stage(config, artifact="firewall.nft")
+        self.assertNotIn("tcp dport { 80, 443 }", local_firewall)
+
+    def test_https_rejects_nonpublic_ipv4(self):
+        example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+        config = example.replace("  transport: local-http\n", "  domain: portal.example.org\n  expected_ipv4: 192.168.1.8\n")
+        result, endpoint = self.stage(config, artifact="portal-public")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("portal.expected_ipv4", result.stderr)
+        self.assertIsNone(endpoint)
+
     def test_stages_the_complete_profile_from_the_example(self):
         example = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
         result, profile = self.stage(example)
