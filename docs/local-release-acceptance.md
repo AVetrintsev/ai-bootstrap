@@ -61,14 +61,13 @@ python3 tests/accept_codex_isolation.py "$PROJECT_A"
 "$PYTHON" tests/accept_canvas_revocation.py "$PROJECT_A" "$CHROMIUM"
 python3 tests/accept_project_memory.py "$PROJECT_A" "$PROJECT_B"
 "$PYTHON" tests/accept_shared_memory.py "$PROJECT_A" "$PROJECT_B" "$CHROMIUM" ./install.sh
-"$PYTHON" tests/accept_shared_rules.py "$PROJECT_A" "$PROJECT_B" "$CHROMIUM" ./install.sh
 ```
 
 Матрица должна содержать завершённые вызовы инструментов обоих агентов
 из терминала и Canvas обоих проектов. Один факт отправки запроса или
 появление события вызова инструмента не считается успешным результатом.
 
-Сценарии общей памяти и правил поддерживают `ACCEPT_AGENTS=qwen` либо
+Сценарии общей памяти поддерживают `ACCEPT_AGENTS=qwen` либо
 `ACCEPT_AGENTS=codex` для продолжения приёмки по одному агенту. По умолчанию
 проверяются оба. Частичный запуск фиксировать отдельно: он не закрывает
 матрицу до успешной проверки второго агента.

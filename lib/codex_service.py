@@ -16,7 +16,6 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from shared_rules import RULES_PATH, Rules
 
 STATE = Path('/var/lib/ai-codex')
 BINARY = '/opt/ai-codex/bin/codex'
@@ -214,14 +213,13 @@ class LoginControl:
 
 
 class ProjectSession:
-    def __init__(self, project, writer, *, state=STATE, binary=BINARY, api_key=API_KEY, rules_path=RULES_PATH):
+    def __init__(self, project, writer, *, state=STATE, binary=BINARY, api_key=API_KEY):
         self.project, self.writer, self.state, self.binary, self.api_key = project, writer, state, binary, api_key
         self.server = None
         self.session = None
         self.turn = None
         self.profile = None
         self.model = None
-        self.rules = Rules(rules_path)
 
     async def send(self, message):
         self.writer.write(json.dumps({'jsonrpc': '2.0', **message}).encode() + b'\n')
@@ -252,8 +250,7 @@ class ProjectSession:
         account = (await self.server.call('account/read')).get('account')
         if self.profile == 'chatgpt' and (not account or account.get('type') != 'chatgpt'):
             raise CodexError('login_required')
-        args = {'cwd': '/workspace/repo', 'approvalPolicy': 'never', 'sandbox': 'danger-full-access',
-                'developerInstructions': self.rules.instructions()}
+        args = {'cwd': '/workspace/repo', 'approvalPolicy': 'never', 'sandbox': 'danger-full-access'}
         if resume:
             args['threadId'] = identifier
         # Required project MCP servers must finish starting before the first turn.
@@ -358,12 +355,12 @@ class ProjectSession:
             await self.server.close()
 
 
-async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=API_KEY, rules_path=RULES_PATH):
+async def serve(listener, project=None, *, state=STATE, binary=BINARY, api_key=API_KEY):
     control = LoginControl(state, binary=binary, api_key=api_key) if project is None else None
     slots = asyncio.Semaphore(2)
 
     async def client(reader, writer):
-        session = ProjectSession(project, writer, state=state, binary=binary, api_key=api_key, rules_path=rules_path) if project else None
+        session = ProjectSession(project, writer, state=state, binary=binary, api_key=api_key) if project else None
         active = None
         try:
             if slots.locked():

@@ -2,7 +2,6 @@
 
 import argparse
 from contextlib import contextmanager
-from datetime import datetime, timezone
 import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,7 +17,6 @@ from typing import cast
 from urllib.parse import urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from shared_rules import RULES_PATH, Rules
 
 
 CONFIG = Path("/etc/ai-bootstrap/model-gateway.json")
@@ -66,9 +64,10 @@ def validate_settings(settings):
         allowed = policy.get("models")
         if not isinstance(allowed, list) or not allowed or any(not isinstance(model, str) or model not in models for model in allowed):
             raise ValueError("model_gateway policy must allow known models")
-        for field, minimum, maximum in (("requests_per_day", 0, 1000000), ("max_output_tokens", 1, 65536)):
-            if type(policy.get(field)) is not int or not minimum <= policy[field] <= maximum:
-                raise ValueError(f"model_gateway policy {field} is outside the permitted range")
+        # Older installations may still carry budget fields. They no longer
+        # impose local limits; spending limits belong to the provider.
+        policy.pop("requests_per_day", None)
+        policy.pop("max_output_tokens", None)
     return settings
 
 
@@ -79,24 +78,12 @@ def database(state):
     connection = sqlite3.connect(state / "gateway.sqlite3", timeout=10)
     connection.row_factory = sqlite3.Row
     connection.execute("CREATE TABLE IF NOT EXISTS projects (name TEXT PRIMARY KEY, token TEXT NOT NULL, digest TEXT UNIQUE NOT NULL)")
-    connection.execute("CREATE TABLE IF NOT EXISTS usage (project TEXT NOT NULL, day TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY (project, day))")
     connection.commit()
     try:
         with connection:
             yield connection
     finally:
         connection.close()
-
-
-def reserve_request(state, project, limit):
-    day = datetime.now(timezone.utc).date().isoformat()
-    with database(state) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute("INSERT OR IGNORE INTO usage VALUES (?, ?, 0)", (project, day))
-        return connection.execute(
-            "UPDATE usage SET requests = requests + 1 WHERE project = ? AND day = ? AND requests < ?",
-            (project, day, limit),
-        ).rowcount == 1
 
 
 def provision(config, state, project):
@@ -109,14 +96,12 @@ def provision(config, state, project):
         connection.execute("INSERT OR IGNORE INTO projects VALUES (?, ?, ?)",
                            (project, token, hashlib.sha256(token.encode()).hexdigest()))
         row = connection.execute("SELECT token FROM projects WHERE name = ?", (project,)).fetchone()
-    return {"api_key": row["token"], "model": policy["models"][0],
-            "models": policy["models"], "max_output_tokens": policy["max_output_tokens"]}
+    return {"api_key": row["token"], "model": policy["models"][0], "models": policy["models"]}
 
 
 class GatewayServer(ThreadingHTTPServer):
     config: Path
     state: Path
-    rules_path: Path
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -165,12 +150,6 @@ class Handler(BaseHTTPRequestHandler):
         authorized = self.authorize()
         if authorized is None:
             return
-        if self.path == '/v1/platform/rules':
-            try:
-                self.reply(200, {'text': Rules(self.gateway.rules_path).instructions()})
-            except (OSError, sqlite3.Error):
-                self.error(503, 'rules_unavailable', 'Shared rules are unavailable. Retry after the service is restored.')
-            return
         if self.path != "/v1/models":
             self.error(404, "not_found", "Unknown gateway endpoint.")
             return
@@ -206,21 +185,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         model = settings["models"][alias]
         provider = settings["providers"][model["provider"]]
-        tokens = body.get("max_tokens", body.get("max_completion_tokens", policy["max_output_tokens"]))
-        if type(tokens) is not int or tokens < 1 or not isinstance(body.get("messages"), list) or type(body.get("stream", False)) is not bool:
-            self.error(400, "invalid_request", "Invalid messages, stream or output token limit.")
+        if not isinstance(body.get("messages"), list) or type(body.get("stream", False)) is not bool:
+            self.error(400, "invalid_request", "Invalid messages or stream flag.")
             return
-        if not reserve_request(self.gateway.state, project, policy["requests_per_day"]):
-            self.error(429, "project_quota_exceeded", "The project's daily request limit is exhausted; it resets at 00:00 UTC.")
-            return
-        outgoing = {key: value for key, value in body.items() if key in {
-            "messages", "tools", "tool_choice", "temperature", "top_p", "stop", "seed",
-            "frequency_penalty", "presence_penalty", "parallel_tool_calls", "response_format",
-            "stream", "stream_options", "enable_thinking", "reasoning_effort",
-        }}
+        # Request options are owned by the agent and provider, including token
+        # limits and reasoning. Only the configured destination and credential
+        # are selected by this transport; JSON fields cannot override either.
+        outgoing = dict(body)
         outgoing["model"] = model["model"]
-        outgoing["max_tokens"] = min(tokens, policy["max_output_tokens"])
-        outgoing["n"] = 1
         endpoint = urlsplit(provider["base_url"])
         upstream = http.client.HTTPSConnection(endpoint.hostname, endpoint.port or 443,
                                                timeout=120, context=ssl.create_default_context())
@@ -266,12 +238,11 @@ class Handler(BaseHTTPRequestHandler):
             upstream.close()
 
 
-def make_server(config, state, address, *, rules_path=RULES_PATH):
+def make_server(config, state, address):
     configuration(config)
     server = GatewayServer(address, Handler)
     server.config = Path(config)
     server.state = Path(state)
-    server.rules_path = Path(rules_path)
     return server
 
 
