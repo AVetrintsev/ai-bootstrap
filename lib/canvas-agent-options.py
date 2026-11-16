@@ -14,7 +14,8 @@ from openhands.sdk.agent import ACPAgent
 
 
 logger = logging.getLogger(__name__)
-PROJECT_AGENT_COMMANDS = {("/usr/local/bin/codex",), ("/usr/local/bin/qwen",)}
+QWEN_COMMAND = ("/usr/local/bin/qwen",)
+PROJECT_AGENT_COMMANDS = {("/usr/local/bin/codex",), QWEN_COMMAND}
 
 
 @conversation_router.get("/{conversation_id}/agent_options")
@@ -30,7 +31,8 @@ async def agent_options(
         isinstance(agent, ACPAgent)
         and tuple(agent.acp_command) in PROJECT_AGENT_COMMANDS
         and tuple(agent.acp_args) == ("--acp",)
-        and (not info.available_models or not info.available_efforts)
+        # A saved Qwen catalog can describe a previous gateway configuration.
+        and (tuple(agent.acp_command) == QWEN_COMMAND or not info.available_models or not info.available_efforts)
     ):
         try:
             events = await service.get_event_service(conversation_id)

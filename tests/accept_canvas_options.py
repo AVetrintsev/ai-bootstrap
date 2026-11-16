@@ -103,8 +103,11 @@ def check(page, profile_id, name):
                 page.get_by_test_id(f"chat-input-acp-model-option-{value}").click()
                 wait_for_value(page, endpoint, "current_model_id", value)
             info = json.loads(api(page, endpoint))
-        effort = next(option["value"] for option in info["available_efforts"]
-                      if option["value"] in ("low", "medium", "high") and option["value"] != info["current_effort"])
+        offered_efforts = {option["value"] for option in info["available_efforts"]}
+        if name == "qwen-code":
+            assert "high" in offered_efforts, offered_efforts
+        effort = next(value for value in ("high", "medium", "low")
+                      if value in offered_efforts and value != info["current_effort"])
         picker.select_option(effort)
         wait_for_value(page, endpoint, "current_effort", effort)
         page.reload()

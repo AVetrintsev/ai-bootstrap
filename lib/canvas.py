@@ -128,7 +128,8 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
     @asynccontextmanager
     async def project_response(upstream, request, path, query, headers):
         url = "http://localhost/" + path
-        if request.method == "GET" and CONVERSATION_PATH.fullmatch(path):
+        if (request.method == "GET" and CONVERSATION_PATH.fullmatch(path)
+                and request.query.get("initialize_acp") != "false"):
             # Agent Server from a previous release may not have this route yet.
             async with upstream.get(url + "/agent_options", params=query, headers=headers,
                                     allow_redirects=False) as remote:
@@ -148,7 +149,8 @@ location.replace('/conversations/'+encodeURIComponent(project.conversation)+'?ba
         headers = {key: value for key, value in request.headers.items() if key.lower() in SAFE_HEADERS}
         headers["X-Session-API-Key"] = config["key"]
         # Neither the portal cookie nor a caller-selected destination/key reaches the sandbox.
-        query = [(key, value) for key, value in request.query.items() if key not in ("session_api_key", "api_key")]
+        query = [(key, value) for key, value in request.query.items()
+                 if key not in ("session_api_key", "api_key", "initialize_acp")]
         url = "http://localhost/" + path
         watcher = asyncio.create_task(watch_session(request))
         try:
